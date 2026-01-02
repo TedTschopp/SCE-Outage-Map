@@ -97,7 +97,37 @@ Then navigate to `http://localhost:8000` in your browser.
 
 ### Data Source
 
-Note: This application currently uses mock data for demonstration purposes. In a production environment, you would need to integrate with SCE's actual outage data source or API.
+The application attempts to fetch live outage data from SCE's API endpoints. The following sources are tried in order:
+
+1. `https://www.sce.com/api/outages/outagedata`
+2. `https://kubra.io/data/7e7fab29-4498-41ad-ba3e-14905a4b539a/public/summary-1/data.json`
+3. `https://kubra.io/data/7e7fab29-4498-41ad-ba3e-14905a4b539a/public/cluster-1/data.json`
+
+If all attempts fail (e.g., due to CORS restrictions or API changes), the application falls back to mock data for demonstration purposes.
+
+#### Enabling CORS Proxy
+
+If you encounter CORS issues when accessing the live API, you can enable the CORS proxy by editing `app.js`:
+
+```javascript
+const DATA_SOURCES = {
+    // ... other config
+    useCorsProxy: true  // Change to true
+};
+```
+
+#### Using Custom Data Source
+
+To use a different data source, modify the `DATA_SOURCES.primary` array in `app.js`:
+
+```javascript
+const DATA_SOURCES = {
+    primary: [
+        'https://your-custom-api.com/outages'
+    ],
+    // ...
+};
+```
 
 ## Browser Compatibility
 

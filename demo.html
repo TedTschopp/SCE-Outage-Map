@@ -1,0 +1,437 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SCE Outage Map - San Gabriel Valley (Demo)</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background-color: #f5f5f5;
+        }
+
+        .container {
+            max-width: 100%;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        header {
+            background-color: #fff;
+            padding: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            z-index: 1000;
+        }
+
+        h1 {
+            color: #333;
+            font-size: 24px;
+            margin-bottom: 15px;
+        }
+
+        .stats-container {
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+        }
+
+        .stat-box {
+            display: flex;
+            flex-direction: column;
+            background-color: #f8f9fa;
+            padding: 12px 20px;
+            border-radius: 8px;
+            min-width: 150px;
+            border-left: 4px solid #007bff;
+        }
+
+        .stat-label {
+            font-size: 12px;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 5px;
+        }
+
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #333;
+        }
+
+        #map {
+            flex: 1;
+            width: 100%;
+            min-height: 400px;
+            background-color: #e0e0e0;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .info-panel {
+            background-color: #fff;
+            padding: 15px 20px;
+            border-top: 1px solid #ddd;
+            font-size: 14px;
+            color: #666;
+        }
+
+        .info-panel p {
+            margin: 5px 0;
+        }
+
+        .demo-marker {
+            position: absolute;
+            background-color: #dc3545;
+            border: 2px solid #fff;
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+            cursor: pointer;
+            transform: translate(-50%, -50%);
+        }
+
+        .custom-demo-marker {
+            background-color: #28a745;
+        }
+
+        .demo-polygon {
+            position: absolute;
+            border: 2px solid #dc3545;
+            background-color: rgba(220, 53, 69, 0.2);
+            border-radius: 50%;
+        }
+
+        .demo-circle {
+            position: absolute;
+            border: 2px solid #007bff;
+            background-color: rgba(0, 123, 255, 0.1);
+            border-radius: 50%;
+        }
+
+        .tooltip {
+            position: absolute;
+            background-color: white;
+            padding: 10px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+            display: none;
+            z-index: 1000;
+            min-width: 200px;
+        }
+
+        .tooltip.visible {
+            display: block;
+        }
+
+        .tooltip-title {
+            font-weight: bold;
+            font-size: 16px;
+            margin-bottom: 10px;
+            color: #333;
+        }
+
+        .tooltip-info {
+            margin: 5px 0;
+            color: #666;
+            font-size: 14px;
+        }
+
+        .tooltip-info strong {
+            color: #333;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>SCE Outage Map - San Gabriel Valley</h1>
+            <div class="stats-container">
+                <div class="stat-box">
+                    <span class="stat-label">Outages</span>
+                    <span class="stat-value" id="outage-count">0</span>
+                </div>
+                <div class="stat-box">
+                    <span class="stat-label">Customers Affected</span>
+                    <span class="stat-value" id="customer-count">0</span>
+                </div>
+                <div class="stat-box">
+                    <span class="stat-label">Regions Affected</span>
+                    <span class="stat-value" id="region-count">0</span>
+                </div>
+                <div class="stat-box">
+                    <span class="stat-label">Last Updated</span>
+                    <span class="stat-value" id="last-updated">Never</span>
+                </div>
+            </div>
+        </header>
+        
+        <div id="map"></div>
+        
+        <div class="info-panel">
+            <p>Showing outages within 20 miles of San Gabriel Valley</p>
+            <p>Map refreshes every 5 minutes</p>
+            <p><strong>Demo Mode:</strong> Using simulated outage data for demonstration</p>
+        </div>
+    </div>
+
+    <div id="tooltip" class="tooltip">
+        <div id="tooltip-content"></div>
+    </div>
+
+    <script>
+        // Demo implementation without external map library
+        const mapElement = document.getElementById('map');
+        const tooltip = document.getElementById('tooltip');
+        const tooltipContent = document.getElementById('tooltip-content');
+
+        // Configuration for live data
+        const DATA_SOURCES = {
+            primary: [
+                'https://kubra.io/data/7e7fab29-4498-41ad-ba3e-14905a4b539a/public/summary-1/data.json',
+                'https://kubra.io/data/7e7fab29-4498-41ad-ba3e-14905a4b539a/public/cluster-1/data.json'
+            ],
+            useLiveData: true // Set to false to use mock data only
+        };
+
+        const SAN_GABRIEL_VALLEY = {
+            lat: 34.1064,
+            lng: -118.0689,
+            radius: 20 // miles
+        };
+
+        // Calculate distance between two points in miles
+        function calculateDistance(lat1, lng1, lat2, lng2) {
+            const R = 3959; // Earth's radius in miles
+            const dLat = (lat2 - lat1) * Math.PI / 180;
+            const dLng = (lng2 - lng1) * Math.PI / 180;
+            const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+                      Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                      Math.sin(dLng / 2) * Math.sin(dLng / 2);
+            const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+            return R * c;
+        }
+
+        // Check if location is within radius
+        function isWithinRadius(lat, lng) {
+            const distance = calculateDistance(
+                SAN_GABRIEL_VALLEY.lat,
+                SAN_GABRIEL_VALLEY.lng,
+                lat,
+                lng
+            );
+            return distance <= SAN_GABRIEL_VALLEY.radius;
+        }
+
+        // Fetch live outage data
+        async function fetchLiveOutageData() {
+            if (!DATA_SOURCES.useLiveData) {
+                return null;
+            }
+
+            for (const endpoint of DATA_SOURCES.primary) {
+                try {
+                    console.log(`Attempting to fetch from: ${endpoint}`);
+                    const response = await fetch(endpoint);
+                    if (response.ok) {
+                        const data = await response.json();
+                        console.log('Successfully fetched data:', data);
+                        return parseLiveData(data);
+                    }
+                } catch (err) {
+                    console.log(`Failed to fetch from ${endpoint}:`, err.message);
+                }
+            }
+            return null;
+        }
+
+        // Parse live data from API
+        function parseLiveData(data) {
+            const outages = [];
+            
+            if (data.file_data && Array.isArray(data.file_data)) {
+                data.file_data.forEach(item => {
+                    if (item.geom && item.geom.coordinates) {
+                        const coords = item.geom.coordinates;
+                        let lat, lng;
+                        
+                        if (item.geom.type === 'Point') {
+                            lng = coords[0];
+                            lat = coords[1];
+                        } else if (item.geom.type === 'Polygon' && coords[0] && coords[0][0]) {
+                            lng = coords[0][0][0];
+                            lat = coords[0][0][1];
+                        }
+                        
+                        if (lat && lng && isWithinRadius(lat, lng)) {
+                            // Convert lat/lng to percentage for display
+                            const x = ((lng + 118.0689) / 0.5 * 100) % 100;
+                            const y = ((34.1064 - lat) / 0.5 * 100) % 100;
+                            
+                            outages.push({
+                                x: Math.max(10, Math.min(90, x)),
+                                y: Math.max(10, Math.min(90, y)),
+                                customers: item.desc?.n_out || item.customers_out || 0,
+                                region: item.desc?.name || 'Unknown',
+                                cause: item.desc?.cause || 'Under investigation',
+                                restoration: item.desc?.etr || 'Unknown',
+                                hasPolygon: item.geom.type === 'Polygon'
+                            });
+                        }
+                    }
+                });
+            }
+            
+            return outages.length > 0 ? outages : null;
+        }
+
+        // Generate demo outages
+        function generateDemoOutages() {
+            const outages = [
+                { x: 30, y: 25, customers: 342, region: 'Pasadena', cause: 'Equipment failure', restoration: '3:30 PM', hasPolygon: true },
+                { x: 55, y: 40, customers: 156, region: 'Arcadia', cause: 'Tree contact', restoration: '5:15 PM', hasPolygon: false },
+                { x: 45, y: 60, customers: 89, region: 'Monrovia', cause: 'Vehicle accident', restoration: '2:45 PM', hasPolygon: true },
+                { x: 70, y: 35, customers: 421, region: 'West Covina', cause: 'Weather conditions', restoration: '6:00 PM', hasPolygon: true },
+                { x: 25, y: 70, customers: 234, region: 'San Gabriel', cause: 'Under investigation', restoration: '4:20 PM', hasPolygon: false },
+                { x: 60, y: 55, customers: 178, region: 'El Monte', cause: 'Equipment failure', restoration: '3:00 PM', hasPolygon: true }
+            ];
+            return outages;
+        }
+
+        // Add custom marker from URL
+        function addCustomMarkerFromURL() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const markerParam = urlParams.get('marker');
+            
+            if (markerParam) {
+                const parts = markerParam.split(',');
+                if (parts.length >= 2) {
+                    const x = parseFloat(parts[0]);
+                    const y = parseFloat(parts[1]);
+                    const label = parts[2] || 'Custom Location';
+                    
+                    if (!isNaN(x) && !isNaN(y)) {
+                        const marker = document.createElement('div');
+                        marker.className = 'demo-marker custom-demo-marker';
+                        marker.style.left = x + '%';
+                        marker.style.top = y + '%';
+                        marker.addEventListener('click', (e) => showTooltip(e, {
+                            title: label,
+                            info: [`Location: ${x.toFixed(2)}%, ${y.toFixed(2)}%`]
+                        }));
+                        mapElement.appendChild(marker);
+                    }
+                }
+            }
+        }
+
+        // Display outages on map
+        async function displayOutages() {
+            // Try to fetch live data first
+            let outages = await fetchLiveOutageData();
+            
+            // Fall back to demo data if live data unavailable
+            if (!outages) {
+                console.log('Using demo data');
+                outages = generateDemoOutages();
+            } else {
+                console.log('Using live data:', outages);
+            }
+
+            let totalCustomers = 0;
+            const regions = new Set();
+
+            // Draw 20-mile radius circle
+            const circle = document.createElement('div');
+            circle.className = 'demo-circle';
+            circle.style.width = '80%';
+            circle.style.height = '80%';
+            circle.style.left = '10%';
+            circle.style.top = '10%';
+            mapElement.appendChild(circle);
+
+            outages.forEach(outage => {
+                totalCustomers += outage.customers;
+                regions.add(outage.region);
+
+                // Add polygon if applicable
+                if (outage.hasPolygon) {
+                    const polygon = document.createElement('div');
+                    polygon.className = 'demo-polygon';
+                    polygon.style.width = '60px';
+                    polygon.style.height = '60px';
+                    polygon.style.left = `calc(${outage.x}% - 30px)`;
+                    polygon.style.top = `calc(${outage.y}% - 30px)`;
+                    polygon.addEventListener('click', (e) => showTooltip(e, {
+                        title: `Affected Area: ${outage.region}`,
+                        info: [`Customers Affected: ${outage.customers.toLocaleString()}`]
+                    }));
+                    mapElement.appendChild(polygon);
+                }
+
+                // Add marker
+                const marker = document.createElement('div');
+                marker.className = 'demo-marker';
+                marker.style.left = outage.x + '%';
+                marker.style.top = outage.y + '%';
+                marker.addEventListener('click', (e) => showTooltip(e, {
+                    title: 'Power Outage',
+                    info: [
+                        `Region: ${outage.region}`,
+                        `Customers Affected: ${outage.customers}`,
+                        `Cause: ${outage.cause}`,
+                        `Est. Restoration: ${outage.restoration}`
+                    ]
+                }));
+                mapElement.appendChild(marker);
+            });
+
+            // Add custom markers
+            addCustomMarkerFromURL();
+
+            // Update statistics
+            document.getElementById('outage-count').textContent = outages.length;
+            document.getElementById('customer-count').textContent = totalCustomers.toLocaleString();
+            document.getElementById('region-count').textContent = regions.size;
+            
+            const now = new Date();
+            document.getElementById('last-updated').textContent = now.toLocaleTimeString();
+        }
+
+        function showTooltip(event, data) {
+            tooltipContent.innerHTML = `
+                <div class="tooltip-title">${data.title}</div>
+                ${data.info.map(info => `<div class="tooltip-info">${info}</div>`).join('')}
+            `;
+            
+            tooltip.style.left = event.pageX + 10 + 'px';
+            tooltip.style.top = event.pageY + 10 + 'px';
+            tooltip.classList.add('visible');
+            
+            event.stopPropagation();
+        }
+
+        // Hide tooltip when clicking elsewhere
+        document.addEventListener('click', () => {
+            tooltip.classList.remove('visible');
+        });
+
+        // Initialize
+        displayOutages();
+
+        // Auto-refresh every 5 minutes (simulated)
+        setInterval(() => {
+            const now = new Date();
+            document.getElementById('last-updated').textContent = now.toLocaleTimeString();
+        }, 5 * 60 * 1000);
+    </script>
+</body>
+</html>

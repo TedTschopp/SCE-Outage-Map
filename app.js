@@ -224,9 +224,17 @@ function parseOutageData(data) {
 // Generate mock outage data for demonstration
 function generateMockOutageData() {
     const mockOutages = [];
-    const numOutages = Math.floor(Math.random() * 10) + 3;
+    const MIN_MOCK_OUTAGES = 3;
+    const MAX_MOCK_OUTAGES = 10;
+    const targetOutages = Math.floor(Math.random() * (MAX_MOCK_OUTAGES - MIN_MOCK_OUTAGES + 1)) + MIN_MOCK_OUTAGES;
     
-    for (let i = 0; i < numOutages; i++) {
+    // Generate outages within the radius
+    let attempts = 0;
+    const maxAttempts = targetOutages * 3; // Prevent infinite loops
+    
+    while (mockOutages.length < targetOutages && attempts < maxAttempts) {
+        attempts++;
+        
         // Generate random locations within the San Gabriel Valley area
         const latOffset = (Math.random() - 0.5) * 0.5;
         const lngOffset = (Math.random() - 0.5) * 0.5;
@@ -238,7 +246,7 @@ function generateMockOutageData() {
             const isPolygon = Math.random() > 0.5;
             
             const outage = {
-                id: `outage-${i}`,
+                id: `outage-${mockOutages.length}`,
                 lat: lat,
                 lng: lng,
                 customersAffected: customersAffected,

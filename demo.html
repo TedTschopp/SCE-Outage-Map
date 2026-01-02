@@ -312,24 +312,28 @@
             const markerParam = urlParams.get('marker');
             
             if (markerParam) {
-                const parts = markerParam.split(',');
-                if (parts.length >= 2) {
-                    const x = parseFloat(parts[0]);
-                    const y = parseFloat(parts[1]);
-                    const label = parts[2] || 'Custom Location';
-                    
-                    if (!isNaN(x) && !isNaN(y)) {
-                        const marker = document.createElement('div');
-                        marker.className = 'demo-marker custom-demo-marker';
-                        marker.style.left = x + '%';
-                        marker.style.top = y + '%';
-                        marker.addEventListener('click', (e) => showTooltip(e, {
-                            title: label,
-                            info: [`Location: ${x.toFixed(2)}%, ${y.toFixed(2)}%`]
-                        }));
-                        mapElement.appendChild(marker);
+                // Support multiple markers separated by semicolons
+                const markers = markerParam.split(';');
+                markers.forEach(markerStr => {
+                    const parts = markerStr.split(',');
+                    if (parts.length >= 2) {
+                        const x = parseFloat(parts[0]);
+                        const y = parseFloat(parts[1]);
+                        const label = parts[2] || 'Custom Location';
+                        
+                        if (!isNaN(x) && !isNaN(y)) {
+                            const marker = document.createElement('div');
+                            marker.className = 'demo-marker custom-demo-marker';
+                            marker.style.left = x + '%';
+                            marker.style.top = y + '%';
+                            marker.addEventListener('click', (e) => showTooltip(e, {
+                                title: label,
+                                info: [`Location: ${x.toFixed(2)}%, ${y.toFixed(2)}%`]
+                            }));
+                            mapElement.appendChild(marker);
+                        }
                     }
-                }
+                });
             }
         }
 

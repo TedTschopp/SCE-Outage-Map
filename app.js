@@ -112,6 +112,7 @@ let baseTileLayer;
 let layerControl;
 
 let drpepPolygonOverlaysByKey = new Map();
+let drpepOverlayKeyByLeafletId = new Map();
 
 const LAYER_PREFS_STORAGE_KEY = 'sce-outage-map.layer-prefs.v1';
 
@@ -174,6 +175,39 @@ function initMap() {
         {},
         { collapsed: true }
     ).addTo(map);
+
+    // Persist visibility changes even when toggled via the Leaflet layer control.
+    map.on('overlayadd', (e) => {
+        const key = drpepOverlayKeyByLeafletId.get(L.stamp(e.layer));
+        if (!key) {
+            return;
+        }
+        const overlay = drpepPolygonOverlaysByKey.get(key);
+        if (!overlay) {
+            return;
+        }
+        overlay.visible = true;
+        const prefs = loadLayerPrefs();
+        prefs[key] = { ...(prefs[key] || {}), visible: true, color: overlay.color };
+        saveLayerPrefs(prefs);
+        renderLayerSettingsPanel();
+    });
+
+    map.on('overlayremove', (e) => {
+        const key = drpepOverlayKeyByLeafletId.get(L.stamp(e.layer));
+        if (!key) {
+            return;
+        }
+        const overlay = drpepPolygonOverlaysByKey.get(key);
+        if (!overlay) {
+            return;
+        }
+        overlay.visible = false;
+        const prefs = loadLayerPrefs();
+        prefs[key] = { ...(prefs[key] || {}), visible: false, color: overlay.color };
+        saveLayerPrefs(prefs);
+        renderLayerSettingsPanel();
+    });
     
     // Add a circle to show the 20-mile radius
     L.circle([SAN_GABRIEL_VALLEY.lat, SAN_GABRIEL_VALLEY.lng], {
@@ -217,6 +251,7 @@ function getOrCreatePolygonOverlay({ key, displayName, serviceUrl, layerId, init
     };
 
     drpepPolygonOverlaysByKey.set(key, overlay);
+    drpepOverlayKeyByLeafletId.set(L.stamp(layerGroup), key);
 
     if (layerControl) {
         layerControl.addOverlay(layerGroup, displayName);

@@ -108,8 +108,33 @@ let outageMarkers = [];
 let outagePolygons = [];
 let customMarkers = [];
 
-let drpepPolygonLayerGroup;
-let drpepPolygonLayers = [];
+let baseTileLayer;
+let layerControl;
+
+let drpepPolygonOverlaysByKey = new Map();
+
+const LAYER_PREFS_STORAGE_KEY = 'sce-outage-map.layer-prefs.v1';
+
+function loadLayerPrefs() {
+    try {
+        const raw = localStorage.getItem(LAYER_PREFS_STORAGE_KEY);
+        if (!raw) {
+            return {};
+        }
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+        return {};
+    }
+}
+
+function saveLayerPrefs(prefs) {
+    try {
+        localStorage.setItem(LAYER_PREFS_STORAGE_KEY, JSON.stringify(prefs));
+    } catch {
+        // ignore
+    }
+}
 
 function setActiveDataSourceLabel(label) {
     const el = document.getElementById('data-source-value');
@@ -139,13 +164,16 @@ function labelForSuccessfulEndpoint(endpoint) {
 function initMap() {
     map = L.map('map').setView([SAN_GABRIEL_VALLEY.lat, SAN_GABRIEL_VALLEY.lng], 11);
     
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    baseTileLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
         maxZoom: 19
     }).addTo(map);
 
-    // DRPEP overlays (polygons only)
-    drpepPolygonLayerGroup = L.layerGroup().addTo(map);
+    layerControl = L.control.layers(
+        { 'OpenStreetMap': baseTileLayer },
+        {},
+        { collapsed: true }
+    ).addTo(map);
     
     // Add a circle to show the 20-mile radius
     L.circle([SAN_GABRIEL_VALLEY.lat, SAN_GABRIEL_VALLEY.lng], {
@@ -165,6 +193,60 @@ function getSgvBoundingBox4326() {
         SAN_GABRIEL_VALLEY.lng,
         SAN_GABRIEL_VALLEY.radius
     );
+}
+
+function getOverlayKey(serviceUrl, layerId) {
+    return `${serviceUrl}::${layerId}`;
+}
+
+function getOrCreatePolygonOverlay({ key, displayName, serviceUrl, layerId, initialColor, initialVisible }) {
+    const existing = drpepPolygonOverlaysByKey.get(key);
+    if (existing) {
+        return existing;
+    }
+
+    const layerGroup = L.layerGroup();
+    const overlay = {
+        key,
+        displayName,
+        serviceUrl,
+        layerId,
+        layerGroup,
+        color: initialColor,
+        visible: initialVisible
+    };
+
+    drpepPolygonOverlaysByKey.set(key, overlay);
+
+    if (layerControl) {
+        layerControl.addOverlay(layerGroup, displayName);
+    }
+
+    if (overlay.visible) {
+        layerGroup.addTo(map);
+    }
+
+    return overlay;
+}
+
+function applyOverlayColor(overlay, color) {
+    overlay.color = color;
+    overlay.layerGroup.eachLayer(layer => {
+        if (typeof layer.setStyle === 'function') {
+            layer.setStyle({ color, fillColor: color });
+        }
+    });
+}
+
+function setOverlayVisibility(overlay, visible) {
+    overlay.visible = visible;
+    const onMap = map && map.hasLayer(overlay.layerGroup);
+    if (visible && !onMap) {
+        overlay.layerGroup.addTo(map);
+    }
+    if (!visible && onMap) {
+        overlay.layerGroup.removeFrom(map);
+    }
 }
 
 function maybeProxyUrl(url) {
@@ -266,16 +348,12 @@ async function refreshDrpepPolygonOverlays() {
         return;
     }
 
-    if (!drpepPolygonLayerGroup) {
-        drpepPolygonLayerGroup = L.layerGroup().addTo(map);
-    }
-
     const bbox = getSgvBoundingBox4326();
-    drpepPolygonLayerGroup.clearLayers();
 
-    for (const layer of drpepPolygonLayers) {
+    for (const overlay of drpepPolygonOverlaysByKey.values()) {
         try {
-            const layerQueryUrl = `${layer.serviceUrl}/${layer.layerId}/query`;
+            overlay.layerGroup.clearLayers();
+            const layerQueryUrl = `${overlay.serviceUrl}/${overlay.layerId}/query`;
             const features = await fetchArcgisFeaturesPaged(layerQueryUrl, {
                 bbox,
                 where: '1=1',
@@ -292,14 +370,14 @@ async function refreshDrpepPolygonOverlays() {
                 }
 
                 const polygon = L.polygon(latLngs, {
-                    color: '#007bff',
-                    fillColor: '#007bff',
+                    color: overlay.color,
+                    fillColor: overlay.color,
                     fillOpacity: 0.08,
                     weight: 1
                 });
 
-                polygon.bindPopup(`<div class="popup-title">${layer.displayName}</div>`);
-                polygon.addTo(drpepPolygonLayerGroup);
+                polygon.bindPopup(`<div class="popup-title">${overlay.displayName}</div>`);
+                polygon.addTo(overlay.layerGroup);
             }
         } catch (e) {
             // Non-fatal: leave the overlay empty if it errors.
@@ -313,13 +391,78 @@ async function initDrpepLayers() {
     }
 
     const polygonLayers = await discoverDrpepPolygonLayers();
-    drpepPolygonLayers = polygonLayers.map(({ serviceLabel, serviceUrl, layerId, layerName }) => ({
-        displayName: `${serviceLabel}: ${layerName}`,
-        serviceUrl,
-        layerId
-    }));
+
+    const prefs = loadLayerPrefs();
+    polygonLayers.forEach(({ serviceLabel, serviceUrl, layerId, layerName }) => {
+        const key = getOverlayKey(serviceUrl, layerId);
+        const displayName = `${serviceLabel}: ${layerName}`;
+        const saved = prefs[key] || {};
+
+        getOrCreatePolygonOverlay({
+            key,
+            displayName,
+            serviceUrl,
+            layerId,
+            initialColor: typeof saved.color === 'string' ? saved.color : '#007bff',
+            initialVisible: typeof saved.visible === 'boolean' ? saved.visible : true
+        });
+    });
+
+    renderLayerSettingsPanel();
 
     await refreshDrpepPolygonOverlays();
+}
+
+function renderLayerSettingsPanel() {
+    const root = document.getElementById('layers-panel');
+    if (!root) {
+        return;
+    }
+
+    const list = document.getElementById('layers-list');
+    if (!list) {
+        return;
+    }
+
+    list.innerHTML = '';
+    const overlays = Array.from(drpepPolygonOverlaysByKey.values())
+        .sort((a, b) => a.displayName.localeCompare(b.displayName));
+
+    const prefs = loadLayerPrefs();
+
+    overlays.forEach(overlay => {
+        const row = document.createElement('div');
+        row.className = 'layers-row';
+
+        const checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = !!overlay.visible;
+        checkbox.className = 'layers-toggle';
+        checkbox.addEventListener('change', () => {
+            setOverlayVisibility(overlay, checkbox.checked);
+            prefs[overlay.key] = { ...(prefs[overlay.key] || {}), visible: checkbox.checked, color: overlay.color };
+            saveLayerPrefs(prefs);
+        });
+
+        const label = document.createElement('div');
+        label.className = 'layers-label';
+        label.textContent = overlay.displayName;
+
+        const color = document.createElement('input');
+        color.type = 'color';
+        color.value = overlay.color;
+        color.className = 'layers-color';
+        color.addEventListener('input', () => {
+            applyOverlayColor(overlay, color.value);
+            prefs[overlay.key] = { ...(prefs[overlay.key] || {}), visible: overlay.visible, color: color.value };
+            saveLayerPrefs(prefs);
+        });
+
+        row.appendChild(checkbox);
+        row.appendChild(label);
+        row.appendChild(color);
+        list.appendChild(row);
+    });
 }
 
 // Convert miles to meters

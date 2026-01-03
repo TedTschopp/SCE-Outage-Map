@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SCE Outage Map - San Gabriel Valley</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin=""/>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>SCE Outage Map - San Gabriel Valley</h1>
+            <div class="stats-container">
+                <div class="stat-box">
+                    <span class="stat-label">Outages</span>
+                    <span class="stat-value" id="outage-count">0</span>
+                </div>
+                <div class="stat-box">
+                    <span class="stat-label">Customers Affected</span>
+                    <span class="stat-value" id="customer-count">0</span>
+                </div>
+                <div class="stat-box">
+                    <span class="stat-label">Regions Affected</span>
+                    <span class="stat-value" id="region-count">0</span>
+                </div>
+                <div class="stat-box">
+                    <span class="stat-label">Last Updated</span>
+                    <span class="stat-value" id="last-updated">Never</span>
+                </div>
+            </div>
+        </header>
+        
+        <div id="map"></div>
+        
+        <div class="info-panel">
+            <p>Showing outages within 20 miles of San Gabriel Valley</p>
+            <p>Map refreshes every 5 minutes</p>
+        </div>
+    </div>
+
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
+    <script src="app.js"></script>
+</body>
+</html>

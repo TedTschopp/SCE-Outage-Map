@@ -2,7 +2,7 @@
 const SAN_GABRIEL_VALLEY = {
     lat: 34.1064,
     lng: -118.0689,
-    radius: 20 // miles
+    radius: 10 // miles
 };
 
 const REFRESH_INTERVAL = 5 * 60 * 1000; // 5 minutes in milliseconds

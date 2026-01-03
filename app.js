@@ -32,13 +32,13 @@ const DATA_SOURCES = {
     useCorsProxy: false // Set to true if CORS issues occur
 };
 
-// DRPEP (Distributed Resources Plan / Enhanced Plan) polygon layer sources
+// DRPEP (Distributed Resources Plan / Enhanced Plan) layer sources
 // These are ArcGIS FeatureServer services observed from https://drpep.sce.com/drpep/?page=Page
-// We intentionally render polygons only (no point/line layers).
+// We render point/line/polygon feature layers.
 const DRPEP_SOURCES = {
     enabled: true,
     // A curated set of FeatureServer service roots used by DRPEP.
-    // Each service may contain multiple sublayers; we discover polygon sublayers at runtime.
+    // Each service may contain multiple sublayers; we discover renderable sublayers at runtime.
     services: [
         // DRPEP Available Load Capacity Map
         { label: 'DRPEP', url: 'https://drpep.sce.com/arcgis_server/rest/services/Hosted/AVL_LOAD_CAP_TOGGLE/FeatureServer' },
@@ -116,6 +116,192 @@ let drpepOverlayKeyByLeafletId = new Map();
 
 const LAYER_PREFS_STORAGE_KEY = 'sce-outage-map.layer-prefs.v1';
 
+function clamp(n, min, max) {
+    return Math.min(max, Math.max(min, n));
+}
+
+function arcgisColorArrayToRgba(color) {
+    if (!Array.isArray(color) || color.length < 3) {
+        return null;
+    }
+    const r = clamp(Number(color[0]) || 0, 0, 255);
+    const g = clamp(Number(color[1]) || 0, 0, 255);
+    const b = clamp(Number(color[2]) || 0, 0, 255);
+    const a255 = color.length >= 4 ? clamp(Number(color[3]) || 255, 0, 255) : 255;
+    const a = a255 / 255;
+    return { css: `rgba(${r},${g},${b},${a})`, alpha: a };
+}
+
+function getRendererFromLayerInfo(layerInfo) {
+    return layerInfo?.drawingInfo?.renderer || null;
+}
+
+function getDefaultColorFromRenderer(renderer) {
+    if (!renderer) {
+        return '#007bff';
+    }
+
+    const trySymbol = (symbol) => {
+        const c = arcgisColorArrayToRgba(symbol?.color);
+        if (c && c.css) {
+            return c.css;
+        }
+        const oc = arcgisColorArrayToRgba(symbol?.outline?.color);
+        if (oc && oc.css) {
+            return oc.css;
+        }
+        return null;
+    };
+
+    if (renderer.type === 'simple') {
+        return trySymbol(renderer.symbol) || '#007bff';
+    }
+    if (renderer.type === 'uniqueValue') {
+        return trySymbol(renderer.defaultSymbol) || trySymbol(renderer.uniqueValueInfos?.[0]?.symbol) || '#007bff';
+    }
+    if (renderer.type === 'classBreaks') {
+        return trySymbol(renderer.defaultSymbol) || trySymbol(renderer.classBreakInfos?.[0]?.symbol) || '#007bff';
+    }
+    return '#007bff';
+}
+
+function buildStyleFromSymbol({ geometryType, symbol, fallbackColor }) {
+    const rgba = arcgisColorArrayToRgba(symbol?.color);
+    const outlineRgba = arcgisColorArrayToRgba(symbol?.outline?.color);
+    const color = outlineRgba?.css || rgba?.css || fallbackColor;
+    const fillColor = rgba?.css || fallbackColor;
+    const fillOpacity = rgba?.alpha ?? 0.15;
+    const outlineWidth = Number(symbol?.outline?.width);
+
+    if (geometryType === 'esriGeometryPolygon') {
+        return {
+            color,
+            fillColor,
+            fillOpacity: clamp(fillOpacity, 0, 1),
+            weight: Number.isFinite(outlineWidth) ? outlineWidth : 1
+        };
+    }
+    if (geometryType === 'esriGeometryPolyline') {
+        const width = Number(symbol?.width);
+        return {
+            color: rgba?.css || fallbackColor,
+            weight: Number.isFinite(width) ? width : 2,
+            opacity: clamp(rgba?.alpha ?? 0.8, 0, 1)
+        };
+    }
+    if (geometryType === 'esriGeometryPoint') {
+        const size = Number(symbol?.size);
+        return {
+            radius: Number.isFinite(size) ? clamp(size / 2, 2, 10) : 4,
+            color: outlineRgba?.css || fallbackColor,
+            fillColor: rgba?.css || fallbackColor,
+            fillOpacity: clamp(rgba?.alpha ?? 0.7, 0, 1),
+            weight: Number.isFinite(outlineWidth) ? outlineWidth : 1
+        };
+    }
+    return { color: fallbackColor };
+}
+
+function buildStyleFromOverride({ geometryType, color, overrideStyle }) {
+    if (geometryType === 'esriGeometryPolygon') {
+        return {
+            color,
+            fillColor: color,
+            fillOpacity: clamp(overrideStyle?.fillOpacity ?? 0.08, 0, 1),
+            weight: overrideStyle?.weight ?? 1,
+            opacity: clamp(overrideStyle?.opacity ?? 0.8, 0, 1)
+        };
+    }
+    if (geometryType === 'esriGeometryPolyline') {
+        return {
+            color,
+            weight: overrideStyle?.weight ?? 2,
+            opacity: clamp(overrideStyle?.opacity ?? 0.8, 0, 1)
+        };
+    }
+    if (geometryType === 'esriGeometryPoint') {
+        return {
+            radius: overrideStyle?.radius ?? 4,
+            color,
+            fillColor: color,
+            fillOpacity: clamp(overrideStyle?.fillOpacity ?? 0.7, 0, 1),
+            weight: overrideStyle?.weight ?? 1,
+            opacity: clamp(overrideStyle?.opacity ?? 0.9, 0, 1)
+        };
+    }
+    return { color };
+}
+
+function applyStyleAdjust(style, geometryType, adjust) {
+    if (!adjust || !style) {
+        return style;
+    }
+
+    const opacityScale = typeof adjust.opacityScale === 'number' ? adjust.opacityScale : 1;
+    const fillOpacityScale = typeof adjust.fillOpacityScale === 'number' ? adjust.fillOpacityScale : 1;
+
+    if (geometryType === 'esriGeometryPolygon') {
+        if (typeof style.opacity === 'number') {
+            style.opacity = clamp(style.opacity * opacityScale, 0, 1);
+        }
+        if (typeof style.fillOpacity === 'number') {
+            style.fillOpacity = clamp(style.fillOpacity * fillOpacityScale, 0, 1);
+        }
+        return style;
+    }
+
+    if (geometryType === 'esriGeometryPolyline') {
+        if (typeof style.opacity === 'number') {
+            style.opacity = clamp(style.opacity * opacityScale, 0, 1);
+        }
+        return style;
+    }
+
+    if (geometryType === 'esriGeometryPoint') {
+        if (typeof style.opacity === 'number') {
+            style.opacity = clamp(style.opacity * opacityScale, 0, 1);
+        }
+        if (typeof style.fillOpacity === 'number') {
+            style.fillOpacity = clamp(style.fillOpacity * fillOpacityScale, 0, 1);
+        }
+        return style;
+    }
+
+    return style;
+}
+
+function getSymbolForFeature(renderer, featureAttributes) {
+    if (!renderer) {
+        return null;
+    }
+
+    if (renderer.type === 'simple') {
+        return renderer.symbol || null;
+    }
+
+    if (renderer.type === 'uniqueValue') {
+        const field = renderer.field1;
+        const value = field ? featureAttributes?.[field] : undefined;
+        const match = (renderer.uniqueValueInfos || []).find(info => String(info.value) === String(value));
+        return match?.symbol || renderer.defaultSymbol || renderer.symbol || null;
+    }
+
+    if (renderer.type === 'classBreaks') {
+        const field = renderer.field;
+        const raw = field ? featureAttributes?.[field] : undefined;
+        const num = Number(raw);
+        if (!Number.isFinite(num)) {
+            return renderer.defaultSymbol || renderer.symbol || null;
+        }
+
+        // ArcGIS classBreakInfos use classMaxValue; choose first class where num <= classMaxValue.
+        const match = (renderer.classBreakInfos || []).find(info => Number.isFinite(Number(info.classMaxValue)) && num <= Number(info.classMaxValue));
+        return match?.symbol || renderer.defaultSymbol || renderer.symbol || null;
+    }
+
+    return renderer.symbol || null;
+}
+
 function loadLayerPrefs() {
     try {
         const raw = localStorage.getItem(LAYER_PREFS_STORAGE_KEY);
@@ -188,7 +374,12 @@ function initMap() {
         }
         overlay.visible = true;
         const prefs = loadLayerPrefs();
-        prefs[key] = { ...(prefs[key] || {}), visible: true, color: overlay.color };
+        prefs[key] = {
+            ...(prefs[key] || {}),
+            visible: true,
+            styleMode: overlay.styleMode,
+            overrideColor: overlay.overrideColor
+        };
         saveLayerPrefs(prefs);
         renderLayerSettingsPanel();
     });
@@ -204,7 +395,12 @@ function initMap() {
         }
         overlay.visible = false;
         const prefs = loadLayerPrefs();
-        prefs[key] = { ...(prefs[key] || {}), visible: false, color: overlay.color };
+        prefs[key] = {
+            ...(prefs[key] || {}),
+            visible: false,
+            styleMode: overlay.styleMode,
+            overrideColor: overlay.overrideColor
+        };
         saveLayerPrefs(prefs);
         renderLayerSettingsPanel();
     });
@@ -233,7 +429,7 @@ function getOverlayKey(serviceUrl, layerId) {
     return `${serviceUrl}::${layerId}`;
 }
 
-function getOrCreatePolygonOverlay({ key, displayName, serviceUrl, layerId, initialColor, initialVisible }) {
+function getOrCreatePolygonOverlay({ key, displayName, serviceUrl, layerId, geometryType, initialColor, initialVisible }) {
     const existing = drpepPolygonOverlaysByKey.get(key);
     if (existing) {
         return existing;
@@ -245,7 +441,14 @@ function getOrCreatePolygonOverlay({ key, displayName, serviceUrl, layerId, init
         displayName,
         serviceUrl,
         layerId,
+        geometryType,
         layerGroup,
+        renderer: null,
+        defaultColor: initialColor,
+        styleMode: 'renderer',
+        overrideColor: initialColor,
+        overrideStyle: null,
+        styleAdjust: null,
         color: initialColor,
         visible: initialVisible
     };
@@ -265,10 +468,12 @@ function getOrCreatePolygonOverlay({ key, displayName, serviceUrl, layerId, init
 }
 
 function applyOverlayColor(overlay, color) {
+    overlay.styleMode = 'override';
+    overlay.overrideColor = color;
     overlay.color = color;
     overlay.layerGroup.eachLayer(layer => {
         if (typeof layer.setStyle === 'function') {
-            layer.setStyle({ color, fillColor: color });
+            layer.setStyle(buildStyleFromOverride({ geometryType: overlay.geometryType, color, overrideStyle: overlay.overrideStyle }));
         }
     });
 }
@@ -284,22 +489,43 @@ function setOverlayVisibility(overlay, visible) {
     }
 }
 
-function maybeProxyUrl(url) {
-    return DATA_SOURCES.useCorsProxy ? DATA_SOURCES.corsProxy + encodeURIComponent(url) : url;
+function buildProxyUrl(url) {
+    return DATA_SOURCES.corsProxy + encodeURIComponent(url);
 }
 
-async function fetchJson(url) {
-    const response = await fetch(maybeProxyUrl(url), {
-        method: 'GET',
-        headers: {
-            'Accept': 'application/json'
-        }
-    });
+async function fetchJson(url, { allowProxyFallback = true } = {}) {
+    const attempt = async (targetUrl) => {
+        const response = await fetch(targetUrl, {
+            method: 'GET',
+            headers: {
+                'Accept': 'application/json'
+            }
+        });
 
-    if (!response.ok) {
-        throw new Error(`HTTP ${response.status} for ${url}`);
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status} for ${url}`);
+        }
+        return response.json();
+    };
+
+    // If the user explicitly enabled the proxy, always use it.
+    if (DATA_SOURCES.useCorsProxy) {
+        return attempt(buildProxyUrl(url));
     }
-    return response.json();
+
+    // Otherwise, try direct first (fast / no third-party), and fall back to proxy on CORS/network failure.
+    try {
+        return await attempt(url);
+    } catch (err) {
+        if (!allowProxyFallback) {
+            throw err;
+        }
+        try {
+            return await attempt(buildProxyUrl(url));
+        } catch {
+            throw err;
+        }
+    }
 }
 
 function arcgisRingsToLeafletLatLngs(rings) {
@@ -318,7 +544,23 @@ function arcgisRingsToLeafletLatLngs(rings) {
     return ringLatLngs.length ? ringLatLngs : null;
 }
 
-async function fetchArcgisFeaturesPaged(layerQueryUrl, { bbox, where = '1=1', outFields = 'OBJECTID', pageSize = 1000, maxFeatures = 5000 }) {
+function arcgisPathsToLeafletLatLngs(paths) {
+    if (!Array.isArray(paths)) {
+        return null;
+    }
+
+    const pathLatLngs = paths
+        .filter(path => Array.isArray(path) && path.length)
+        .map(path => path
+            .filter(pt => Array.isArray(pt) && pt.length >= 2)
+            .map(([x, y]) => [y, x])
+        )
+        .filter(path => path.length >= 2);
+
+    return pathLatLngs.length ? pathLatLngs : null;
+}
+
+async function fetchArcgisFeaturesPaged(layerQueryUrl, { bbox, where = '1=1', outFields = 'objectid', orderByFields = '', pageSize = 1000, maxFeatures = 5000 }) {
     const allFeatures = [];
     for (let offset = 0; offset < maxFeatures; offset += pageSize) {
         const url = buildArcgisQueryUrl(layerQueryUrl, {
@@ -327,7 +569,8 @@ async function fetchArcgisFeaturesPaged(layerQueryUrl, { bbox, where = '1=1', ou
             bbox,
             extraParams: {
                 resultOffset: String(offset),
-                resultRecordCount: String(pageSize)
+                resultRecordCount: String(pageSize),
+                ...(orderByFields ? { orderByFields } : {})
             }
         });
 
@@ -346,7 +589,7 @@ async function fetchArcgisFeaturesPaged(layerQueryUrl, { bbox, where = '1=1', ou
     return allFeatures;
 }
 
-async function discoverDrpepPolygonLayers() {
+async function discoverDrpepLayers() {
     const discovered = [];
     for (const service of DRPEP_SOURCES.services) {
         try {
@@ -359,12 +602,40 @@ async function discoverDrpepPolygonLayers() {
                 }
                 try {
                     const layerInfo = await fetchJson(`${service.url}/${layer.id}?f=json`);
-                    if (layerInfo && layerInfo.geometryType === 'esriGeometryPolygon') {
+                    const geometryType = layerInfo && layerInfo.geometryType;
+                    const isRenderable = geometryType === 'esriGeometryPolygon' || geometryType === 'esriGeometryPolyline' || geometryType === 'esriGeometryPoint';
+                    if (layerInfo && isRenderable) {
+                        const renderer = getRendererFromLayerInfo(layerInfo);
+
+                        const objectIdField =
+                            layerInfo.objectIdField ||
+                            layerInfo.objectIdFieldName ||
+                            'OBJECTID';
+
+                        const maxRecordCount = typeof layerInfo.maxRecordCount === 'number'
+                            ? layerInfo.maxRecordCount
+                            : 2000;
+
+                        const rendererFields = [];
+                        if (renderer?.type === 'uniqueValue') {
+                            if (renderer.field1) rendererFields.push(renderer.field1);
+                            if (renderer.field2) rendererFields.push(renderer.field2);
+                            if (renderer.field3) rendererFields.push(renderer.field3);
+                        }
+                        if (renderer?.type === 'classBreaks') {
+                            if (renderer.field) rendererFields.push(renderer.field);
+                        }
+
                         discovered.push({
                             serviceLabel: service.label,
                             serviceUrl: service.url,
                             layerId: layer.id,
-                            layerName: layerInfo.name || layer.name || `Layer ${layer.id}`
+                            layerName: layerInfo.name || layer.name || `Layer ${layer.id}`,
+                            geometryType,
+                            renderer,
+                            objectIdField,
+                            maxRecordCount,
+                            rendererFields
                         });
                     }
                 } catch (e) {
@@ -372,7 +643,7 @@ async function discoverDrpepPolygonLayers() {
                 }
             }
         } catch (e) {
-            // Skip services that fail to load.
+            console.warn('Failed to load DRPEP service:', service.url, e && e.message ? e.message : e);
         }
     }
     return discovered;
@@ -389,30 +660,85 @@ async function refreshDrpepPolygonOverlays() {
         try {
             overlay.layerGroup.clearLayers();
             const layerQueryUrl = `${overlay.serviceUrl}/${overlay.layerId}/query`;
+
+            const outFieldsSet = new Set();
+            if (overlay.objectIdField) {
+                outFieldsSet.add(overlay.objectIdField);
+            }
+            if (Array.isArray(overlay.rendererFields)) {
+                overlay.rendererFields.forEach(f => {
+                    if (typeof f === 'string' && f.trim()) {
+                        outFieldsSet.add(f);
+                    }
+                });
+            }
+            const outFields = outFieldsSet.size ? Array.from(outFieldsSet).join(',') : '*';
+            const pageSize = typeof overlay.maxRecordCount === 'number'
+                ? Math.min(1000, overlay.maxRecordCount)
+                : 1000;
+
             const features = await fetchArcgisFeaturesPaged(layerQueryUrl, {
                 bbox,
                 where: '1=1',
-                outFields: 'OBJECTID',
-                pageSize: 1000,
-                maxFeatures: 5000
+                outFields,
+                orderByFields: overlay.objectIdField || '',
+                pageSize,
+                maxFeatures: 20000
             });
 
             for (const feature of features) {
-                const rings = feature?.geometry?.rings;
-                const latLngs = arcgisRingsToLeafletLatLngs(rings);
-                if (!latLngs) {
+                const geometry = feature?.geometry;
+                if (!geometry) {
                     continue;
                 }
 
-                const polygon = L.polygon(latLngs, {
-                    color: overlay.color,
-                    fillColor: overlay.color,
-                    fillOpacity: 0.08,
-                    weight: 1
-                });
+                const objectId = overlay.objectIdField ? feature?.attributes?.[overlay.objectIdField] : undefined;
+                const attrs = feature?.attributes || {};
 
-                polygon.bindPopup(`<div class="popup-title">${overlay.displayName}</div>`);
-                polygon.addTo(overlay.layerGroup);
+                const effectiveColor = overlay.styleMode === 'override' ? overlay.overrideColor : overlay.defaultColor;
+                const symbol = overlay.styleMode === 'override' ? null : getSymbolForFeature(overlay.renderer, attrs);
+                const style = overlay.styleMode === 'override'
+                    ? buildStyleFromOverride({ geometryType: overlay.geometryType, color: effectiveColor, overrideStyle: overlay.overrideStyle })
+                    : (symbol
+                        ? buildStyleFromSymbol({ geometryType: overlay.geometryType, symbol, fallbackColor: effectiveColor })
+                        : (overlay.geometryType === 'esriGeometryPolygon'
+                            ? { color: effectiveColor, fillColor: effectiveColor, fillOpacity: 0.08, weight: 1 }
+                            : overlay.geometryType === 'esriGeometryPolyline'
+                                ? { color: effectiveColor, weight: 2, opacity: 0.8 }
+                                : { radius: 4, color: effectiveColor, fillColor: effectiveColor, fillOpacity: 0.7, weight: 1 }));
+
+                applyStyleAdjust(style, overlay.geometryType, overlay.styleAdjust);
+
+                if (overlay.geometryType === 'esriGeometryPolygon') {
+                    const latLngs = arcgisRingsToLeafletLatLngs(geometry.rings);
+                    if (!latLngs) {
+                        continue;
+                    }
+                    const polygon = L.polygon(latLngs, style);
+                    polygon.bindPopup(`<div class="popup-title">${overlay.displayName}</div><div class="popup-info"><strong>OBJECTID:</strong> ${objectId ?? '—'}</div>`);
+                    polygon.addTo(overlay.layerGroup);
+                    continue;
+                }
+
+                if (overlay.geometryType === 'esriGeometryPolyline') {
+                    const latLngs = arcgisPathsToLeafletLatLngs(geometry.paths);
+                    if (!latLngs) {
+                        continue;
+                    }
+                    const line = L.polyline(latLngs, style);
+                    line.bindPopup(`<div class="popup-title">${overlay.displayName}</div><div class="popup-info"><strong>OBJECTID:</strong> ${objectId ?? '—'}</div>`);
+                    line.addTo(overlay.layerGroup);
+                    continue;
+                }
+
+                if (overlay.geometryType === 'esriGeometryPoint') {
+                    if (typeof geometry.x !== 'number' || typeof geometry.y !== 'number') {
+                        continue;
+                    }
+                    const point = L.circleMarker([geometry.y, geometry.x], style);
+                    point.bindPopup(`<div class="popup-title">${overlay.displayName}</div><div class="popup-info"><strong>OBJECTID:</strong> ${objectId ?? '—'}</div>`);
+                    point.addTo(overlay.layerGroup);
+                }
             }
         } catch (e) {
             // Non-fatal: leave the overlay empty if it errors.
@@ -425,22 +751,65 @@ async function initDrpepLayers() {
         return;
     }
 
-    const polygonLayers = await discoverDrpepPolygonLayers();
+    const polygonLayers = await discoverDrpepLayers();
 
     const prefs = loadLayerPrefs();
-    polygonLayers.forEach(({ serviceLabel, serviceUrl, layerId, layerName }) => {
+    polygonLayers
+        // Do not include the PARTIAL grid layer at all.
+        .filter(l => !(typeof l.layerName === 'string' && l.layerName.trim().toUpperCase() === 'GRID_RANK_AGGR_FULL_PARTIAL'))
+        .forEach(({ serviceLabel, serviceUrl, layerId, layerName, geometryType, renderer, objectIdField, maxRecordCount, rendererFields }) => {
         const key = getOverlayKey(serviceUrl, layerId);
-        const displayName = `${serviceLabel}: ${layerName}`;
+        const geometrySuffix = geometryType === 'esriGeometryPolygon'
+            ? ' (Polygon)'
+            : geometryType === 'esriGeometryPolyline'
+                ? ' (Line)'
+                : geometryType === 'esriGeometryPoint'
+                    ? ' (Point)'
+                    : '';
+        const displayName = `${serviceLabel}: ${layerName}${geometrySuffix}`;
         const saved = prefs[key] || {};
+        const defaultColor = getDefaultColorFromRenderer(renderer);
 
-        getOrCreatePolygonOverlay({
+        const overlay = getOrCreatePolygonOverlay({
             key,
             displayName,
             serviceUrl,
             layerId,
-            initialColor: typeof saved.color === 'string' ? saved.color : '#007bff',
+            geometryType,
+            initialColor: defaultColor,
             initialVisible: typeof saved.visible === 'boolean' ? saved.visible : true
         });
+
+        // Attach renderer + defaults, then apply persisted overrides if present.
+        overlay.renderer = renderer || null;
+        overlay.objectIdField = objectIdField;
+        overlay.maxRecordCount = maxRecordCount;
+        overlay.rendererFields = Array.isArray(rendererFields) ? rendererFields : [];
+        overlay.defaultColor = defaultColor;
+        overlay.styleMode = saved.styleMode === 'override' ? 'override' : 'renderer';
+        overlay.overrideColor = typeof saved.overrideColor === 'string' ? saved.overrideColor : defaultColor;
+        overlay.color = overlay.styleMode === 'override' ? overlay.overrideColor : overlay.defaultColor;
+
+        // Special-case: DRPEP "SCE Service Territory" should default to #00664f and be transparent.
+        // Only apply this default when the user has not already customized this layer.
+        const isServiceTerritory =
+            typeof layerName === 'string' &&
+            layerName.trim().toLowerCase() === 'sce service territory' &&
+            typeof serviceUrl === 'string' &&
+            serviceUrl.includes('/ICA_Layer/');
+
+        if (isServiceTerritory && !saved.styleMode && !saved.overrideColor) {
+            overlay.styleMode = 'override';
+            overlay.overrideColor = '#00664f';
+            overlay.overrideStyle = { fillOpacity: 0.06, weight: 1, opacity: 0.7 };
+            overlay.color = overlay.overrideColor;
+        }
+
+        // Make DRPEP GRID_RANK_AGGR_FULL transparent (keep renderer/multi-color, just lower opacity).
+        const isGridRankFull = typeof layerName === 'string' && layerName.trim().toUpperCase() === 'GRID_RANK_AGGR_FULL';
+        if (isGridRankFull) {
+            overlay.styleAdjust = { opacityScale: 0.7, fillOpacityScale: 0.18 };
+        }
     });
 
     renderLayerSettingsPanel();
@@ -485,11 +854,17 @@ function renderLayerSettingsPanel() {
 
         const color = document.createElement('input');
         color.type = 'color';
-        color.value = overlay.color;
+        // If a layer is multi-color by renderer, the picker acts as an override.
+        color.value = overlay.styleMode === 'override' ? overlay.overrideColor : overlay.defaultColor;
         color.className = 'layers-color';
         color.addEventListener('input', () => {
             applyOverlayColor(overlay, color.value);
-            prefs[overlay.key] = { ...(prefs[overlay.key] || {}), visible: overlay.visible, color: color.value };
+            prefs[overlay.key] = {
+                ...(prefs[overlay.key] || {}),
+                visible: overlay.visible,
+                styleMode: 'override',
+                overrideColor: color.value
+            };
             saveLayerPrefs(prefs);
         });
 

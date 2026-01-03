@@ -102,6 +102,25 @@ function buildArcgisQueryUrl(baseUrl, { where, outFields, bbox, outSR = '4326', 
     return `${baseUrl}?${params.toString()}`;
 }
 
+function buildArcgisCircleQueryUrl(baseUrl, { where, outFields, center, radiusMeters, outSR = '4326', inSR = '4326', extraParams = {} }) {
+    const params = new URLSearchParams({
+        f: 'json',
+        where,
+        outFields,
+        returnGeometry: 'true',
+        outSR: String(outSR),
+        geometry: `${center.lng},${center.lat}`,
+        geometryType: 'esriGeometryPoint',
+        inSR: String(inSR),
+        spatialRel: 'esriSpatialRelIntersects',
+        distance: String(radiusMeters),
+        units: 'esriSRUnit_Meter',
+        ...extraParams
+    });
+
+    return `${baseUrl}?${params.toString()}`;
+}
+
 // Global variables
 let map;
 let outageMarkers = [];
@@ -405,7 +424,7 @@ function initMap() {
         renderLayerSettingsPanel();
     });
     
-    // Add a circle to show the 20-mile radius
+    // Add a circle to show the configured radius
     L.circle([SAN_GABRIEL_VALLEY.lat, SAN_GABRIEL_VALLEY.lng], {
         color: '#007bff',
         fillColor: '#007bff',
@@ -423,6 +442,13 @@ function getSgvBoundingBox4326() {
         SAN_GABRIEL_VALLEY.lng,
         SAN_GABRIEL_VALLEY.radius
     );
+}
+
+function getSgvCircleQuery() {
+    return {
+        center: { lat: SAN_GABRIEL_VALLEY.lat, lng: SAN_GABRIEL_VALLEY.lng },
+        radiusMeters: milesToMeters(SAN_GABRIEL_VALLEY.radius)
+    };
 }
 
 function getOverlayKey(serviceUrl, layerId) {
@@ -560,19 +586,29 @@ function arcgisPathsToLeafletLatLngs(paths) {
     return pathLatLngs.length ? pathLatLngs : null;
 }
 
-async function fetchArcgisFeaturesPaged(layerQueryUrl, { bbox, where = '1=1', outFields = 'objectid', orderByFields = '', pageSize = 1000, maxFeatures = 5000 }) {
+async function fetchArcgisFeaturesPaged(layerQueryUrl, { bbox, circle, where = '1=1', outFields = 'objectid', orderByFields = '', pageSize = 1000, maxFeatures = 5000 }) {
     const allFeatures = [];
     for (let offset = 0; offset < maxFeatures; offset += pageSize) {
-        const url = buildArcgisQueryUrl(layerQueryUrl, {
-            where,
-            outFields,
-            bbox,
-            extraParams: {
-                resultOffset: String(offset),
-                resultRecordCount: String(pageSize),
-                ...(orderByFields ? { orderByFields } : {})
-            }
-        });
+        const extraParams = {
+            resultOffset: String(offset),
+            resultRecordCount: String(pageSize),
+            ...(orderByFields ? { orderByFields } : {})
+        };
+
+        const url = circle
+            ? buildArcgisCircleQueryUrl(layerQueryUrl, {
+                where,
+                outFields,
+                center: circle.center,
+                radiusMeters: circle.radiusMeters,
+                extraParams
+            })
+            : buildArcgisQueryUrl(layerQueryUrl, {
+                where,
+                outFields,
+                bbox,
+                extraParams
+            });
 
         const data = await fetchJson(url);
         if (!data || data.error) {
@@ -654,7 +690,12 @@ async function refreshDrpepPolygonOverlays() {
         return;
     }
 
-    const bbox = getSgvBoundingBox4326();
+    const circle = getSgvCircleQuery();
+    const clipConfig = {
+        centerLat: circle.center.lat,
+        centerLng: circle.center.lng,
+        radiusMeters: circle.radiusMeters
+    };
 
     for (const overlay of drpepPolygonOverlaysByKey.values()) {
         try {
@@ -678,7 +719,7 @@ async function refreshDrpepPolygonOverlays() {
                 : 1000;
 
             const features = await fetchArcgisFeaturesPaged(layerQueryUrl, {
-                bbox,
+                circle,
                 where: '1=1',
                 outFields,
                 orderByFields: overlay.objectIdField || '',
@@ -714,7 +755,13 @@ async function refreshDrpepPolygonOverlays() {
                     if (!latLngs) {
                         continue;
                     }
-                    const polygon = L.polygon(latLngs, style);
+
+                    const clipped = clipLatLngsToCircle(latLngs, { ...clipConfig, geometryType: 'esriGeometryPolygon' });
+                    if (!clipped) {
+                        continue;
+                    }
+
+                    const polygon = L.polygon(clipped, style);
                     polygon.bindPopup(`<div class="popup-title">${overlay.displayName}</div><div class="popup-info"><strong>OBJECTID:</strong> ${objectId ?? '—'}</div>`);
                     polygon.addTo(overlay.layerGroup);
                     continue;
@@ -725,7 +772,13 @@ async function refreshDrpepPolygonOverlays() {
                     if (!latLngs) {
                         continue;
                     }
-                    const line = L.polyline(latLngs, style);
+
+                    const clipped = clipLatLngsToCircle(latLngs, { ...clipConfig, geometryType: 'esriGeometryPolyline' });
+                    if (!clipped) {
+                        continue;
+                    }
+
+                    const line = L.polyline(clipped, style);
                     line.bindPopup(`<div class="popup-title">${overlay.displayName}</div><div class="popup-info"><strong>OBJECTID:</strong> ${objectId ?? '—'}</div>`);
                     line.addTo(overlay.layerGroup);
                     continue;
@@ -735,6 +788,12 @@ async function refreshDrpepPolygonOverlays() {
                     if (typeof geometry.x !== 'number' || typeof geometry.y !== 'number') {
                         continue;
                     }
+
+                    // Strict: do not display points outside the circle.
+                    if (!isWithinRadius(geometry.y, geometry.x)) {
+                        continue;
+                    }
+
                     const point = L.circleMarker([geometry.y, geometry.x], style);
                     point.bindPopup(`<div class="popup-title">${overlay.displayName}</div><div class="popup-info"><strong>OBJECTID:</strong> ${objectId ?? '—'}</div>`);
                     point.addTo(overlay.layerGroup);
@@ -880,6 +939,264 @@ function milesToMeters(miles) {
     return miles * 1609.34;
 }
 
+function projectLatLngToLocalMeters(lat, lng, centerLat, centerLng) {
+    // Local equirectangular approximation around the center.
+    const R = 6378137; // meters
+    const dLat = (lat - centerLat) * Math.PI / 180;
+    const dLng = (lng - centerLng) * Math.PI / 180;
+    const x = dLng * Math.cos(centerLat * Math.PI / 180) * R;
+    const y = dLat * R;
+    return { x, y };
+}
+
+function unprojectLocalMetersToLatLng(x, y, centerLat, centerLng) {
+    const R = 6378137; // meters
+    const lat = centerLat + (y / R) * 180 / Math.PI;
+    const lng = centerLng + (x / (R * Math.cos(centerLat * Math.PI / 180))) * 180 / Math.PI;
+    return [lat, lng];
+}
+
+function getCirclePolygonXY(radiusMeters, segments = 64) {
+    const pts = [];
+    const n = clamp(Math.floor(segments), 16, 256);
+    for (let i = 0; i < n; i++) {
+        const t = (i / n) * Math.PI * 2;
+        pts.push({ x: Math.cos(t) * radiusMeters, y: Math.sin(t) * radiusMeters });
+    }
+    return pts;
+}
+
+function clipPolylineToCircleXY(pointsXY, radiusMeters) {
+    if (!Array.isArray(pointsXY) || pointsXY.length < 2) {
+        return [];
+    }
+
+    const r2 = radiusMeters * radiusMeters;
+    const inside = (p) => (p.x * p.x + p.y * p.y) <= r2;
+
+    const intersectionsT = (a, b) => {
+        // Solve |a + t(b-a)|^2 = r^2 for t in [0,1]
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const A = dx * dx + dy * dy;
+        if (A === 0) {
+            return [];
+        }
+        const B = 2 * (a.x * dx + a.y * dy);
+        const C = (a.x * a.x + a.y * a.y) - r2;
+        const disc = B * B - 4 * A * C;
+        if (disc < 0) {
+            return [];
+        }
+        const sqrt = Math.sqrt(Math.max(0, disc));
+        const t1 = (-B - sqrt) / (2 * A);
+        const t2 = (-B + sqrt) / (2 * A);
+        const ts = [];
+        if (t1 >= 0 && t1 <= 1) ts.push(t1);
+        if (t2 >= 0 && t2 <= 1 && Math.abs(t2 - t1) > 1e-9) ts.push(t2);
+        ts.sort((x, y) => x - y);
+        return ts;
+    };
+
+    const pointAt = (a, b, t) => ({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+
+    const parts = [];
+    let current = null;
+
+    for (let i = 0; i < pointsXY.length - 1; i++) {
+        const a = pointsXY[i];
+        const b = pointsXY[i + 1];
+        const aIn = inside(a);
+        const bIn = inside(b);
+        const ts = intersectionsT(a, b);
+
+        if (aIn && bIn) {
+            if (!current) {
+                current = [a];
+            }
+            current.push(b);
+            continue;
+        }
+
+        if (aIn && !bIn) {
+            if (!current) {
+                current = [a];
+            }
+            if (ts.length) {
+                const tExit = ts[ts.length - 1];
+                current.push(pointAt(a, b, tExit));
+            }
+            if (current.length >= 2) {
+                parts.push(current);
+            }
+            current = null;
+            continue;
+        }
+
+        if (!aIn && bIn) {
+            if (ts.length) {
+                const tEnter = ts[0];
+                current = [pointAt(a, b, tEnter), b];
+            } else {
+                current = [b];
+            }
+            continue;
+        }
+
+        // both outside
+        if (ts.length >= 2) {
+            parts.push([pointAt(a, b, ts[0]), pointAt(a, b, ts[1])]);
+        }
+        if (current && current.length >= 2) {
+            parts.push(current);
+        }
+        current = null;
+    }
+
+    if (current && current.length >= 2) {
+        parts.push(current);
+    }
+
+    return parts
+        .map(part => part.filter((p, idx) => idx === 0 || (Math.abs(p.x - part[idx - 1].x) > 1e-6 || Math.abs(p.y - part[idx - 1].y) > 1e-6)))
+        .filter(part => part.length >= 2);
+}
+
+function clipPolygonRingToConvexPolygonXY(subjectPts, clipPts) {
+    // Sutherland–Hodgman polygon clipping. Assumes clipPts is convex and CCW.
+    if (!Array.isArray(subjectPts) || subjectPts.length < 3) {
+        return [];
+    }
+    if (!Array.isArray(clipPts) || clipPts.length < 3) {
+        return [];
+    }
+
+    const isInside = (p, a, b) => ((b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x)) >= -1e-12;
+
+    const intersection = (s, e, a, b) => {
+        const dxSE = e.x - s.x;
+        const dySE = e.y - s.y;
+        const dxAB = b.x - a.x;
+        const dyAB = b.y - a.y;
+        const denom = dxSE * dyAB - dySE * dxAB;
+        if (Math.abs(denom) < 1e-12) {
+            return e;
+        }
+        const t = ((a.x - s.x) * dyAB - (a.y - s.y) * dxAB) / denom;
+        return { x: s.x + t * dxSE, y: s.y + t * dySE };
+    };
+
+    let output = subjectPts;
+    for (let i = 0; i < clipPts.length; i++) {
+        const a = clipPts[i];
+        const b = clipPts[(i + 1) % clipPts.length];
+        const input = output;
+        output = [];
+        if (!input.length) {
+            break;
+        }
+        let S = input[input.length - 1];
+        for (const E of input) {
+            const EIn = isInside(E, a, b);
+            const SIn = isInside(S, a, b);
+            if (EIn) {
+                if (!SIn) {
+                    output.push(intersection(S, E, a, b));
+                }
+                output.push(E);
+            } else if (SIn) {
+                output.push(intersection(S, E, a, b));
+            }
+            S = E;
+        }
+    }
+
+    const deduped = [];
+    for (const p of output) {
+        const last = deduped[deduped.length - 1];
+        if (!last || Math.abs(p.x - last.x) > 1e-6 || Math.abs(p.y - last.y) > 1e-6) {
+            deduped.push(p);
+        }
+    }
+    return deduped.length >= 3 ? deduped : [];
+}
+
+function clipLatLngsToCircle(latLngs, { centerLat, centerLng, radiusMeters, geometryType }) {
+    if (!latLngs) {
+        return null;
+    }
+
+    if (geometryType === 'esriGeometryPoint') {
+        if (Array.isArray(latLngs) && latLngs.length === 2 && typeof latLngs[0] === 'number' && typeof latLngs[1] === 'number') {
+            return isWithinRadius(latLngs[0], latLngs[1]) ? latLngs : null;
+        }
+        return null;
+    }
+
+    if (geometryType === 'esriGeometryPolyline') {
+        const paths = (Array.isArray(latLngs) && latLngs.length && Array.isArray(latLngs[0]) && typeof latLngs[0][0] === 'number')
+            ? [latLngs]
+            : (Array.isArray(latLngs) ? latLngs : []);
+
+        const outPaths = [];
+        for (const path of paths) {
+            const ptsXY = path
+                .filter(p => Array.isArray(p) && p.length === 2 && typeof p[0] === 'number' && typeof p[1] === 'number')
+                .map(([lat, lng]) => projectLatLngToLocalMeters(lat, lng, centerLat, centerLng));
+            const clippedPartsXY = clipPolylineToCircleXY(ptsXY, radiusMeters);
+            for (const part of clippedPartsXY) {
+                const out = part.map(p => unprojectLocalMetersToLatLng(p.x, p.y, centerLat, centerLng));
+                if (out.length >= 2) {
+                    outPaths.push(out);
+                }
+            }
+        }
+
+        return outPaths.length ? outPaths : null;
+    }
+
+    if (geometryType === 'esriGeometryPolygon') {
+        const rings = (Array.isArray(latLngs) && latLngs.length && Array.isArray(latLngs[0]) && typeof latLngs[0][0] === 'number')
+            ? [latLngs]
+            : (Array.isArray(latLngs) ? latLngs : []);
+
+        const clipPoly = getCirclePolygonXY(radiusMeters);
+        const outRings = [];
+        for (const ring of rings) {
+            const subject = ring
+                .filter(p => Array.isArray(p) && p.length === 2 && typeof p[0] === 'number' && typeof p[1] === 'number')
+                .map(([lat, lng]) => projectLatLngToLocalMeters(lat, lng, centerLat, centerLng));
+            const clipped = clipPolygonRingToConvexPolygonXY(subject, clipPoly);
+            if (clipped.length >= 3) {
+                outRings.push(clipped.map(p => unprojectLocalMetersToLatLng(p.x, p.y, centerLat, centerLng)));
+            }
+        }
+
+        return outRings.length ? outRings : null;
+    }
+
+    return null;
+}
+
+function centroidOfLatLngs(latLngs) {
+    const flatten = (x) => {
+        if (!x) return [];
+        if (Array.isArray(x) && x.length === 2 && typeof x[0] === 'number' && typeof x[1] === 'number') {
+            return [x];
+        }
+        if (Array.isArray(x)) {
+            return x.flatMap(flatten);
+        }
+        return [];
+    };
+    const pts = flatten(latLngs);
+    if (!pts.length) {
+        return null;
+    }
+    const sum = pts.reduce((acc, [lat, lng]) => ({ lat: acc.lat + lat, lng: acc.lng + lng }), { lat: 0, lng: 0 });
+    return [sum.lat / pts.length, sum.lng / pts.length];
+}
+
 // Calculate distance between two points in miles
 function calculateDistance(lat1, lng1, lat2, lng2) {
     const R = 3959; // Earth's radius in miles
@@ -920,6 +1237,9 @@ function addCustomMarkersFromURL() {
                     const label = parts[2] || 'Custom Location';
                     
                     if (!isNaN(lat) && !isNaN(lng)) {
+                        if (!isWithinRadius(lat, lng)) {
+                            return;
+                        }
                         addCustomMarker(lat, lng, label);
                     }
                 }
@@ -952,23 +1272,21 @@ async function fetchOutageData() {
     try {
         setActiveDataSourceLabel('Loading…');
 
-        const bbox = getBoundingBoxForRadiusMiles(
-            SAN_GABRIEL_VALLEY.lat,
-            SAN_GABRIEL_VALLEY.lng,
-            SAN_GABRIEL_VALLEY.radius
-        );
+        const circle = getSgvCircleQuery();
 
         // Preferred: the same ArcGIS endpoints used by SCE's outage-center page.
         const preferredEndpoints = [
-            buildArcgisQueryUrl(DATA_SOURCES.arcgis.outagesQueryUrl, {
+            buildArcgisCircleQueryUrl(DATA_SOURCES.arcgis.outagesQueryUrl, {
                 where: "UPPER(Status)='ACTIVE'",
                 outFields: 'OBJECTID,OanNo,IncidentId,NoOfAffectedCust_Inci,CityName,CountyName,ERT,OutageStartDateTime,IncidentType,ProblemCode,JobStatus,Status',
-                bbox
+                center: circle.center,
+                radiusMeters: circle.radiusMeters
             }),
-            buildArcgisQueryUrl(DATA_SOURCES.arcgis.majorOutagesQueryUrl, {
+            buildArcgisCircleQueryUrl(DATA_SOURCES.arcgis.majorOutagesQueryUrl, {
                 where: 'MacroId > 0',
                 outFields: '*',
-                bbox
+                center: circle.center,
+                radiusMeters: circle.radiusMeters
             })
         ];
 
@@ -1063,8 +1381,29 @@ function parseOutageData(data) {
                 return;
             }
 
-            if (!isWithinRadius(lat, lng)) {
-                return;
+            // Clip polygons to the circle; keep if any part intersects.
+            if (isPolygon && Array.isArray(polygon) && polygon.length) {
+                const circle = getSgvCircleQuery();
+                const clipped = clipLatLngsToCircle(polygon, {
+                    centerLat: circle.center.lat,
+                    centerLng: circle.center.lng,
+                    radiusMeters: circle.radiusMeters,
+                    geometryType: 'esriGeometryPolygon'
+                });
+                if (!clipped || !clipped[0] || clipped[0].length < 3) {
+                    return;
+                }
+                polygon = clipped[0];
+                const c = centroidOfLatLngs(polygon);
+                if (c) {
+                    lat = c[0];
+                    lng = c[1];
+                }
+            } else {
+                // Points must be inside the radius.
+                if (!isWithinRadius(lat, lng)) {
+                    return;
+                }
             }
 
             const customersAffected =
@@ -1140,12 +1479,40 @@ function parseOutageData(data) {
                     lng = coords[0];
                     lat = coords[1];
                 } else if (item.geom.type === 'Polygon' && coords[0] && coords[0][0]) {
-                    // Use center of polygon
+                    // Use first vertex for a quick location check, but also strictly ensure all vertices are within the circle.
                     lng = coords[0][0][0];
                     lat = coords[0][0][1];
                 }
-                
-                if (lat && lng && isWithinRadius(lat, lng)) {
+
+                let polygonLatLngs = item.geom.type === 'Polygon' && coords[0]
+                    ? coords[0].map(c => [c[1], c[0]])
+                    : null;
+
+                if (item.geom.type === 'Polygon' && polygonLatLngs && polygonLatLngs.length) {
+                    const circle = getSgvCircleQuery();
+                    const clipped = clipLatLngsToCircle(polygonLatLngs, {
+                        centerLat: circle.center.lat,
+                        centerLng: circle.center.lng,
+                        radiusMeters: circle.radiusMeters,
+                        geometryType: 'esriGeometryPolygon'
+                    });
+                    if (!clipped || !clipped[0] || clipped[0].length < 3) {
+                        return;
+                    }
+                    polygonLatLngs = clipped[0];
+                    const c = centroidOfLatLngs(polygonLatLngs);
+                    if (c) {
+                        lat = c[0];
+                        lng = c[1];
+                    }
+                }
+
+                // Points must be inside the radius; polygons are already clipped.
+                if (item.geom.type === 'Point' && !(lat && lng && isWithinRadius(lat, lng))) {
+                    return;
+                }
+
+                if (lat && lng) {
                     outages.push({
                         id: item.id || `outage-${outages.length}`,
                         lat: lat,
@@ -1155,7 +1522,7 @@ function parseOutageData(data) {
                         estimatedRestoration: item.desc?.etr || 'Unknown',
                         cause: item.desc?.cause || 'Under investigation',
                         isPolygon: item.geom.type === 'Polygon',
-                        polygon: item.geom.type === 'Polygon' ? coords[0].map(c => [c[1], c[0]]) : null
+                        polygon: item.geom.type === 'Polygon' ? polygonLatLngs : null
                     });
                 }
             }
@@ -1163,6 +1530,32 @@ function parseOutageData(data) {
     }
 
     return outages;
+}
+
+function areAllLatLngsWithinRadius(latLngs) {
+    if (!latLngs) {
+        return false;
+    }
+
+    // Accept:
+    // - [lat, lng]
+    // - [[lat,lng], ...]
+    // - [[[lat,lng], ...], ...] (rings / multi)
+    if (Array.isArray(latLngs) && latLngs.length === 2 && typeof latLngs[0] === 'number' && typeof latLngs[1] === 'number') {
+        return isWithinRadius(latLngs[0], latLngs[1]);
+    }
+
+    if (!Array.isArray(latLngs)) {
+        return false;
+    }
+
+    for (const child of latLngs) {
+        if (!areAllLatLngsWithinRadius(child)) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 // Generate mock outage data for demonstration

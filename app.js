@@ -815,7 +815,16 @@ async function initDrpepLayers() {
     const prefs = loadLayerPrefs();
     polygonLayers
         // Do not include the PARTIAL grid layer at all.
-        .filter(l => !(typeof l.layerName === 'string' && l.layerName.trim().toUpperCase() === 'GRID_RANK_AGGR_FULL_PARTIAL'))
+        .filter(l => {
+            const name = typeof l.layerName === 'string' ? l.layerName.trim().toUpperCase() : '';
+            if (name === 'GRID_RANK_AGGR_FULL_PARTIAL') {
+                return false;
+            }
+            if (name === 'CPUC_APPROVED_POLYGON') {
+                return false;
+            }
+            return true;
+        })
         .forEach(({ serviceLabel, serviceUrl, layerId, layerName, geometryType, renderer, objectIdField, maxRecordCount, rendererFields }) => {
         const key = getOverlayKey(serviceUrl, layerId);
         const geometrySuffix = geometryType === 'esriGeometryPolygon'
@@ -963,7 +972,40 @@ function getCirclePolygonXY(radiusMeters, segments = 64) {
         const t = (i / n) * Math.PI * 2;
         pts.push({ x: Math.cos(t) * radiusMeters, y: Math.sin(t) * radiusMeters });
     }
+
+    // Ensure CCW winding for the clip polygon.
+    const signedArea = pts.reduce((acc, p, i) => {
+        const q = pts[(i + 1) % pts.length];
+        return acc + (p.x * q.y - q.x * p.y);
+    }, 0);
+    if (signedArea < 0) {
+        pts.reverse();
+    }
+
     return pts;
+}
+
+function normalizeRingXY(ring) {
+    if (!Array.isArray(ring)) {
+        return [];
+    }
+    const cleaned = ring
+        .filter(p => p && typeof p.x === 'number' && typeof p.y === 'number')
+        .filter((p, idx, arr) => {
+            if (idx === 0) return true;
+            const prev = arr[idx - 1];
+            return Math.abs(p.x - prev.x) > 1e-6 || Math.abs(p.y - prev.y) > 1e-6;
+        });
+
+    if (cleaned.length >= 2) {
+        const first = cleaned[0];
+        const last = cleaned[cleaned.length - 1];
+        if (Math.abs(first.x - last.x) <= 1e-6 && Math.abs(first.y - last.y) <= 1e-6) {
+            cleaned.pop();
+        }
+    }
+
+    return cleaned;
 }
 
 function clipPolylineToCircleXY(pointsXY, radiusMeters) {
@@ -1163,9 +1205,10 @@ function clipLatLngsToCircle(latLngs, { centerLat, centerLng, radiusMeters, geom
         const clipPoly = getCirclePolygonXY(radiusMeters);
         const outRings = [];
         for (const ring of rings) {
-            const subject = ring
+            const subject = normalizeRingXY(ring
                 .filter(p => Array.isArray(p) && p.length === 2 && typeof p[0] === 'number' && typeof p[1] === 'number')
-                .map(([lat, lng]) => projectLatLngToLocalMeters(lat, lng, centerLat, centerLng));
+                .map(([lat, lng]) => projectLatLngToLocalMeters(lat, lng, centerLat, centerLng))
+            );
             const clipped = clipPolygonRingToConvexPolygonXY(subject, clipPoly);
             if (clipped.length >= 3) {
                 outRings.push(clipped.map(p => unprojectLocalMetersToLatLng(p.x, p.y, centerLat, centerLng)));

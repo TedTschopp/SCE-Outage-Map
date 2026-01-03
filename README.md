@@ -105,6 +105,16 @@ In practice, that page currently pulls outage data from ArcGIS FeatureServer end
 
 If all attempts fail (e.g., due to CORS restrictions or API changes), the application falls back to mock data for demonstration purposes.
 
+### DRPEP Polygon Overlays
+
+The map also loads polygon-only overlays from SCE’s DRPEP portal:
+
+- <https://drpep.sce.com/drpep/?page=Page>
+
+These layers are discovered at runtime from the DRPEP ArcGIS `FeatureServer` services and rendered as Leaflet polygons (no point/line layers).
+
+To disable DRPEP overlays entirely, set `DRPEP_SOURCES.enabled = false` in `app.js`.
+
 #### Enabling CORS Proxy
 
 If you encounter CORS issues when accessing the live API, you can enable the CORS proxy by editing `app.js`:

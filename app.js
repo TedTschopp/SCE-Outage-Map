@@ -32,6 +32,31 @@ const DATA_SOURCES = {
     useCorsProxy: false // Set to true if CORS issues occur
 };
 
+// DRPEP (Distributed Resources Plan / Enhanced Plan) polygon layer sources
+// These are ArcGIS FeatureServer services observed from https://drpep.sce.com/drpep/?page=Page
+// We intentionally render polygons only (no point/line layers).
+const DRPEP_SOURCES = {
+    enabled: true,
+    // A curated set of FeatureServer service roots used by DRPEP.
+    // Each service may contain multiple sublayers; we discover polygon sublayers at runtime.
+    services: [
+        { label: 'DRPEP', url: 'https://drpep.sce.com/arcgis_server/rest/services/Hosted/DDOR_Layer/FeatureServer' },
+        { label: 'DRPEP', url: 'https://drpep.sce.com/arcgis_server/rest/services/Hosted/LNBA_Layer/FeatureServer' },
+        { label: 'DRPEP', url: 'https://drpep.sce.com/arcgis_server/rest/services/Hosted/GNA_Layer/FeatureServer' },
+        { label: 'DRPEP', url: 'https://drpep.sce.com/arcgis_server/rest/services/Hosted/DRP_PSPS_Layer/FeatureServer' },
+        { label: 'DRPEP', url: 'https://drpep.sce.com/arcgis_server/rest/services/Hosted/DRP_Transmission_Projects/FeatureServer' },
+        { label: 'DRPEP', url: 'https://drpep.sce.com/arcgis_server/rest/services/Hosted/AVL_LOAD_CAP_TOGGLE/FeatureServer' },
+        { label: 'DRPEP', url: 'https://drpep.sce.com/arcgis_server/rest/services/Hosted/AVL_LOAD_HEAT_MAP_TOGGLE/FeatureServer' },
+        { label: 'DRPEP', url: 'https://drpep.sce.com/arcgis_server/rest/services/Hosted/SUBTRANS_HEATMAP/FeatureServer' },
+        { label: 'DRPEP', url: 'https://drpep.sce.com/arcgis_server/rest/services/Hosted/LOAD_GROWTH_PEN_HTMAP/FeatureServer' },
+        { label: 'DRPEP', url: 'https://drpep.sce.com/arcgis_server/rest/services/Hosted/ICA_Layer/FeatureServer' },
+
+        // Public risk-area polygon layers also loaded by DRPEP (helpful context overlays)
+        { label: 'SCE Public', url: 'https://services5.arcgis.com/z6hI6KRjKHvhNO0r/arcgis/rest/services/SCE_HighFireRiskArea_PublicView/FeatureServer' },
+        { label: 'SCE Public', url: 'https://services5.arcgis.com/z6hI6KRjKHvhNO0r/arcgis/rest/services/SCE_HHZ_Tier1_PublicView/FeatureServer' }
+    ]
+};
+
 function getBoundingBoxForRadiusMiles(centerLat, centerLng, radiusMiles) {
     const latDelta = radiusMiles / 69;
     const lngDelta = radiusMiles / (Math.cos(centerLat * Math.PI / 180) * 69);
@@ -44,17 +69,18 @@ function getBoundingBoxForRadiusMiles(centerLat, centerLng, radiusMiles) {
     };
 }
 
-function buildArcgisQueryUrl(baseUrl, { where, outFields, bbox }) {
+function buildArcgisQueryUrl(baseUrl, { where, outFields, bbox, outSR = '4326', inSR = '4326', extraParams = {} }) {
     const params = new URLSearchParams({
         f: 'json',
         where,
         outFields,
         returnGeometry: 'true',
-        outSR: '4326',
+        outSR: String(outSR),
         geometry: `${bbox.xmin},${bbox.ymin},${bbox.xmax},${bbox.ymax}`,
         geometryType: 'esriGeometryEnvelope',
-        inSR: '4326',
-        spatialRel: 'esriSpatialRelIntersects'
+        inSR: String(inSR),
+        spatialRel: 'esriSpatialRelIntersects',
+        ...extraParams
     });
 
     return `${baseUrl}?${params.toString()}`;
@@ -65,6 +91,9 @@ let map;
 let outageMarkers = [];
 let outagePolygons = [];
 let customMarkers = [];
+
+let drpepPolygonLayerGroup;
+let drpepPolygonLayers = [];
 
 function setActiveDataSourceLabel(label) {
     const el = document.getElementById('data-source-value');
@@ -98,6 +127,9 @@ function initMap() {
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
         maxZoom: 19
     }).addTo(map);
+
+    // DRPEP overlays (polygons only)
+    drpepPolygonLayerGroup = L.layerGroup().addTo(map);
     
     // Add a circle to show the 20-mile radius
     L.circle([SAN_GABRIEL_VALLEY.lat, SAN_GABRIEL_VALLEY.lng], {
@@ -109,6 +141,169 @@ function initMap() {
     
     // Add custom markers from URL parameters
     addCustomMarkersFromURL();
+}
+
+function getSgvBoundingBox4326() {
+    return getBoundingBoxForRadiusMiles(
+        SAN_GABRIEL_VALLEY.lat,
+        SAN_GABRIEL_VALLEY.lng,
+        SAN_GABRIEL_VALLEY.radius
+    );
+}
+
+function maybeProxyUrl(url) {
+    return DATA_SOURCES.useCorsProxy ? DATA_SOURCES.corsProxy + encodeURIComponent(url) : url;
+}
+
+async function fetchJson(url) {
+    const response = await fetch(maybeProxyUrl(url), {
+        method: 'GET',
+        headers: {
+            'Accept': 'application/json'
+        }
+    });
+
+    if (!response.ok) {
+        throw new Error(`HTTP ${response.status} for ${url}`);
+    }
+    return response.json();
+}
+
+function arcgisRingsToLeafletLatLngs(rings) {
+    if (!Array.isArray(rings)) {
+        return null;
+    }
+
+    const ringLatLngs = rings
+        .filter(ring => Array.isArray(ring) && ring.length)
+        .map(ring => ring
+            .filter(pt => Array.isArray(pt) && pt.length >= 2)
+            .map(([x, y]) => [y, x])
+        )
+        .filter(ring => ring.length >= 3);
+
+    return ringLatLngs.length ? ringLatLngs : null;
+}
+
+async function fetchArcgisFeaturesPaged(layerQueryUrl, { bbox, where = '1=1', outFields = 'OBJECTID', pageSize = 1000, maxFeatures = 5000 }) {
+    const allFeatures = [];
+    for (let offset = 0; offset < maxFeatures; offset += pageSize) {
+        const url = buildArcgisQueryUrl(layerQueryUrl, {
+            where,
+            outFields,
+            bbox,
+            extraParams: {
+                resultOffset: String(offset),
+                resultRecordCount: String(pageSize)
+            }
+        });
+
+        const data = await fetchJson(url);
+        if (!data || data.error) {
+            break;
+        }
+
+        const features = Array.isArray(data.features) ? data.features : [];
+        allFeatures.push(...features);
+        if (features.length < pageSize) {
+            break;
+        }
+    }
+
+    return allFeatures;
+}
+
+async function discoverDrpepPolygonLayers() {
+    const discovered = [];
+    for (const service of DRPEP_SOURCES.services) {
+        try {
+            const serviceInfo = await fetchJson(`${service.url}?f=json`);
+            const layers = Array.isArray(serviceInfo.layers) ? serviceInfo.layers : [];
+
+            for (const layer of layers) {
+                if (typeof layer.id !== 'number') {
+                    continue;
+                }
+                try {
+                    const layerInfo = await fetchJson(`${service.url}/${layer.id}?f=json`);
+                    if (layerInfo && layerInfo.geometryType === 'esriGeometryPolygon') {
+                        discovered.push({
+                            serviceLabel: service.label,
+                            serviceUrl: service.url,
+                            layerId: layer.id,
+                            layerName: layerInfo.name || layer.name || `Layer ${layer.id}`
+                        });
+                    }
+                } catch (e) {
+                    // Skip layers that fail to describe (often auth-gated or transient).
+                }
+            }
+        } catch (e) {
+            // Skip services that fail to load.
+        }
+    }
+    return discovered;
+}
+
+async function refreshDrpepPolygonOverlays() {
+    if (!DRPEP_SOURCES.enabled || !map) {
+        return;
+    }
+
+    if (!drpepPolygonLayerGroup) {
+        drpepPolygonLayerGroup = L.layerGroup().addTo(map);
+    }
+
+    const bbox = getSgvBoundingBox4326();
+    drpepPolygonLayerGroup.clearLayers();
+
+    for (const layer of drpepPolygonLayers) {
+        try {
+            const layerQueryUrl = `${layer.serviceUrl}/${layer.layerId}/query`;
+            const features = await fetchArcgisFeaturesPaged(layerQueryUrl, {
+                bbox,
+                where: '1=1',
+                outFields: 'OBJECTID',
+                pageSize: 1000,
+                maxFeatures: 5000
+            });
+
+            for (const feature of features) {
+                const rings = feature?.geometry?.rings;
+                const latLngs = arcgisRingsToLeafletLatLngs(rings);
+                if (!latLngs) {
+                    continue;
+                }
+
+                const polygon = L.polygon(latLngs, {
+                    color: '#007bff',
+                    fillColor: '#007bff',
+                    fillOpacity: 0.08,
+                    weight: 1
+                });
+
+                polygon.bindPopup(`<div class="popup-title">${layer.displayName}</div>`);
+                polygon.addTo(drpepPolygonLayerGroup);
+            }
+        } catch (e) {
+            // Non-fatal: leave the overlay empty if it errors.
+        }
+    }
+}
+
+async function initDrpepLayers() {
+    if (!DRPEP_SOURCES.enabled || !map) {
+        return;
+    }
+
+    const polygonLayers = await discoverDrpepPolygonLayers();
+    drpepPolygonLayers = polygonLayers.map(({ serviceLabel, serviceUrl, layerId, layerName }) => ({
+        displayName: `${serviceLabel}: ${layerName}`,
+        serviceUrl,
+        layerId
+    }));
+
+    await refreshDrpepPolygonOverlays();
 }
 
 // Convert miles to meters
@@ -578,6 +773,7 @@ async function updateOutageData() {
 // Initialize the application
 function init() {
     initMap();
+    initDrpepLayers();
     updateOutageData();
     
     // Set up auto-refresh

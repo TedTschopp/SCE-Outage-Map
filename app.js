@@ -40,20 +40,36 @@ const DRPEP_SOURCES = {
     // A curated set of FeatureServer service roots used by DRPEP.
     // Each service may contain multiple sublayers; we discover polygon sublayers at runtime.
     services: [
-        { label: 'DRPEP', url: 'https://drpep.sce.com/arcgis_server/rest/services/Hosted/DDOR_Layer/FeatureServer' },
-        { label: 'DRPEP', url: 'https://drpep.sce.com/arcgis_server/rest/services/Hosted/LNBA_Layer/FeatureServer' },
-        { label: 'DRPEP', url: 'https://drpep.sce.com/arcgis_server/rest/services/Hosted/GNA_Layer/FeatureServer' },
-        { label: 'DRPEP', url: 'https://drpep.sce.com/arcgis_server/rest/services/Hosted/DRP_PSPS_Layer/FeatureServer' },
-        { label: 'DRPEP', url: 'https://drpep.sce.com/arcgis_server/rest/services/Hosted/DRP_Transmission_Projects/FeatureServer' },
+        // DRPEP Available Load Capacity Map
         { label: 'DRPEP', url: 'https://drpep.sce.com/arcgis_server/rest/services/Hosted/AVL_LOAD_CAP_TOGGLE/FeatureServer' },
+
+        // DRPEP Available Capacity Heat Map
         { label: 'DRPEP', url: 'https://drpep.sce.com/arcgis_server/rest/services/Hosted/AVL_LOAD_HEAT_MAP_TOGGLE/FeatureServer' },
-        { label: 'DRPEP', url: 'https://drpep.sce.com/arcgis_server/rest/services/Hosted/SUBTRANS_HEATMAP/FeatureServer' },
-        { label: 'DRPEP', url: 'https://drpep.sce.com/arcgis_server/rest/services/Hosted/LOAD_GROWTH_PEN_HTMAP/FeatureServer' },
+
+        // DRPEP Transmission Circuits Map (often line geometry; polygon-only renderer will skip non-polygons)
+        { label: 'DRPEP', url: 'https://drpep.sce.com/arcgis_server/rest/services/Hosted/Distribution_circuits/FeatureServer' },
+
+        // DRPEP Transmission Projects (may include polygons/lines depending on sublayer)
+        { label: 'DRPEP', url: 'https://drpep.sce.com/arcgis_server/rest/services/Hosted/DRP_Transmission_Projects/FeatureServer' },
+
+        // DRPEP GNA Layers
+        { label: 'DRPEP', url: 'https://drpep.sce.com/arcgis_server/rest/services/Hosted/GNA_Layer/FeatureServer' },
+
+        // DRPEP ICA Layers
         { label: 'DRPEP', url: 'https://drpep.sce.com/arcgis_server/rest/services/Hosted/ICA_Layer/FeatureServer' },
 
-        // Public risk-area polygon layers also loaded by DRPEP (helpful context overlays)
-        { label: 'SCE Public', url: 'https://services5.arcgis.com/z6hI6KRjKHvhNO0r/arcgis/rest/services/SCE_HighFireRiskArea_PublicView/FeatureServer' },
-        { label: 'SCE Public', url: 'https://services5.arcgis.com/z6hI6KRjKHvhNO0r/arcgis/rest/services/SCE_HHZ_Tier1_PublicView/FeatureServer' }
+        // DRPEP LNBA Layers
+        { label: 'DRPEP', url: 'https://drpep.sce.com/arcgis_server/rest/services/Hosted/LNBA_Layer/FeatureServer' },
+
+        // Other DRPEP layers commonly present
+        { label: 'DRPEP', url: 'https://drpep.sce.com/arcgis_server/rest/services/Hosted/DDOR_Layer/FeatureServer' },
+        { label: 'DRPEP', url: 'https://drpep.sce.com/arcgis_server/rest/services/Hosted/DRP_PSPS_Layer/FeatureServer' },
+        { label: 'DRPEP', url: 'https://drpep.sce.com/arcgis_server/rest/services/Hosted/SUBTRANS_HEATMAP/FeatureServer' },
+        { label: 'DRPEP', url: 'https://drpep.sce.com/arcgis_server/rest/services/Hosted/LOAD_GROWTH_PEN_HTMAP/FeatureServer' },
+
+        // SCE Fire Threat Areas layers (polygons)
+        { label: 'SCE Fire Threat Areas', url: 'https://services5.arcgis.com/z6hI6KRjKHvhNO0r/arcgis/rest/services/SCE_HighFireRiskArea_PublicView/FeatureServer' },
+        { label: 'SCE Fire Threat Areas', url: 'https://services5.arcgis.com/z6hI6KRjKHvhNO0r/arcgis/rest/services/SCE_HHZ_Tier1_PublicView/FeatureServer' }
     ]
 };
 

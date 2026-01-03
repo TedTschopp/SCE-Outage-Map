@@ -8,23 +8,87 @@ const SAN_GABRIEL_VALLEY = {
 const REFRESH_INTERVAL = 5 * 60 * 1000; // 5 minutes in milliseconds
 
 // SCE outage data sources
+// NOTE: SCE's outage-center page currently sources outage data from ArcGIS FeatureServer endpoints.
+// This app defaults to those endpoints for the freshest data.
 const DATA_SOURCES = {
-    // Primary SCE API endpoints
-    primary: [
+    // Reference page (for humans)
+    outageCenterUrl: 'https://www.sce.com/outages-safety/outage-center/check-outage-status',
+
+    // ArcGIS endpoints observed from the outage-center page (preferred)
+    arcgis: {
+        outagesQueryUrl: 'https://services5.arcgis.com/z6hI6KRjKHvhNO0r/arcgis/rest/services/Outages_P_VwLayer/FeatureServer/0/query',
+        majorOutagesQueryUrl: 'https://services5.arcgis.com/z6hI6KRjKHvhNO0r/arcgis/rest/services/Major_Outages_P_VwLayer/FeatureServer/0/query'
+    },
+
+    // Legacy / fallback endpoints (kept for resilience)
+    fallback: [
         'https://www.sce.com/api/outages/outagedata',
         'https://kubra.io/data/7e7fab29-4498-41ad-ba3e-14905a4b539a/public/summary-1/data.json',
         'https://kubra.io/data/7e7fab29-4498-41ad-ba3e-14905a4b539a/public/cluster-1/data.json'
     ],
-    // Fallback with CORS proxy if needed
+
+    // Optional fallback with CORS proxy if needed
     corsProxy: 'https://corsproxy.io/?',
     useCorsProxy: false // Set to true if CORS issues occur
 };
+
+function getBoundingBoxForRadiusMiles(centerLat, centerLng, radiusMiles) {
+    const latDelta = radiusMiles / 69;
+    const lngDelta = radiusMiles / (Math.cos(centerLat * Math.PI / 180) * 69);
+
+    return {
+        xmin: centerLng - lngDelta,
+        ymin: centerLat - latDelta,
+        xmax: centerLng + lngDelta,
+        ymax: centerLat + latDelta
+    };
+}
+
+function buildArcgisQueryUrl(baseUrl, { where, outFields, bbox }) {
+    const params = new URLSearchParams({
+        f: 'json',
+        where,
+        outFields,
+        returnGeometry: 'true',
+        outSR: '4326',
+        geometry: `${bbox.xmin},${bbox.ymin},${bbox.xmax},${bbox.ymax}`,
+        geometryType: 'esriGeometryEnvelope',
+        inSR: '4326',
+        spatialRel: 'esriSpatialRelIntersects'
+    });
+
+    return `${baseUrl}?${params.toString()}`;
+}
 
 // Global variables
 let map;
 let outageMarkers = [];
 let outagePolygons = [];
 let customMarkers = [];
+
+function setActiveDataSourceLabel(label) {
+    const el = document.getElementById('data-source-value');
+    if (!el) {
+        return;
+    }
+    el.textContent = label;
+}
+
+function labelForSuccessfulEndpoint(endpoint) {
+    if (endpoint.startsWith(DATA_SOURCES.arcgis.outagesQueryUrl)) {
+        return 'Live: SCE Outage Center (Current Outages)';
+    }
+    if (endpoint.startsWith(DATA_SOURCES.arcgis.majorOutagesQueryUrl)) {
+        return 'Live: SCE Outage Center (Major Outages)';
+    }
+    if (endpoint.includes('sce.com/api/outages/outagedata')) {
+        return 'Live: Legacy SCE API';
+    }
+    if (endpoint.includes('kubra.io')) {
+        return 'Live: Legacy Kubra feed';
+    }
+    return 'Live: Custom endpoint';
+}
 
 // Initialize the map
 function initMap() {
@@ -122,10 +186,35 @@ function addCustomMarker(lat, lng, label) {
 // Fetch outage data from SCE
 async function fetchOutageData() {
     try {
-        // Attempt to fetch live data from SCE's outage API endpoints
-        const endpoints = DATA_SOURCES.useCorsProxy 
-            ? DATA_SOURCES.primary.map(url => DATA_SOURCES.corsProxy + encodeURIComponent(url))
-            : DATA_SOURCES.primary;
+        setActiveDataSourceLabel('Loading…');
+
+        const bbox = getBoundingBoxForRadiusMiles(
+            SAN_GABRIEL_VALLEY.lat,
+            SAN_GABRIEL_VALLEY.lng,
+            SAN_GABRIEL_VALLEY.radius
+        );
+
+        // Preferred: the same ArcGIS endpoints used by SCE's outage-center page.
+        const preferredEndpoints = [
+            buildArcgisQueryUrl(DATA_SOURCES.arcgis.outagesQueryUrl, {
+                where: "UPPER(Status)='ACTIVE'",
+                outFields: 'OBJECTID,OanNo,IncidentId,NoOfAffectedCust_Inci,CityName,CountyName,ERT,OutageStartDateTime,IncidentType,ProblemCode,JobStatus,Status',
+                bbox
+            }),
+            buildArcgisQueryUrl(DATA_SOURCES.arcgis.majorOutagesQueryUrl, {
+                where: 'MacroId > 0',
+                outFields: '*',
+                bbox
+            })
+        ];
+
+        // Legacy/fallback endpoints
+        const endpointsToTry = [...preferredEndpoints, ...DATA_SOURCES.fallback];
+
+        // Attempt to fetch live data from SCE's outage endpoints
+        const endpoints = DATA_SOURCES.useCorsProxy
+            ? endpointsToTry.map(url => DATA_SOURCES.corsProxy + encodeURIComponent(url))
+            : endpointsToTry;
         
         for (const endpoint of endpoints) {
             try {
@@ -142,6 +231,7 @@ async function fetchOutageData() {
                     console.log('Successfully fetched data:', data);
                     const parsed = parseOutageData(data);
                     if (parsed && parsed.length > 0) {
+                        setActiveDataSourceLabel(labelForSuccessfulEndpoint(endpoint));
                         return parsed;
                     }
                 }
@@ -152,9 +242,11 @@ async function fetchOutageData() {
         
         // If all API attempts fail, fall back to mock data
         console.warn('Could not fetch live data from any source, using mock data');
+        setActiveDataSourceLabel('Mock: Generated demo data');
         return generateMockOutageData();
     } catch (error) {
         console.error('Error fetching outage data:', error);
+        setActiveDataSourceLabel('Mock: Generated demo data');
         return generateMockOutageData();
     }
 }
@@ -162,6 +254,94 @@ async function fetchOutageData() {
 // Parse outage data from SCE API response
 function parseOutageData(data) {
     const outages = [];
+
+    // ArcGIS FeatureServer format (used by SCE outage-center page)
+    if (data && Array.isArray(data.features)) {
+        data.features.forEach(feature => {
+            const geometry = feature?.geometry;
+            const attributes = feature?.attributes || {};
+
+            if (!geometry) {
+                return;
+            }
+
+            let lat;
+            let lng;
+            let polygon = null;
+            let isPolygon = false;
+
+            if (typeof geometry.x === 'number' && typeof geometry.y === 'number') {
+                lng = geometry.x;
+                lat = geometry.y;
+            } else if (Array.isArray(geometry.rings) && geometry.rings[0] && geometry.rings[0].length) {
+                isPolygon = true;
+                const ring = geometry.rings[0];
+                // Leaflet expects [lat, lng]
+                polygon = ring.map(([x, y]) => [y, x]);
+
+                // Simple centroid approximation (average of vertices)
+                const centroid = ring.reduce(
+                    (acc, [x, y]) => ({
+                        latSum: acc.latSum + y,
+                        lngSum: acc.lngSum + x,
+                        count: acc.count + 1
+                    }),
+                    { latSum: 0, lngSum: 0, count: 0 }
+                );
+
+                if (centroid.count > 0) {
+                    lat = centroid.latSum / centroid.count;
+                    lng = centroid.lngSum / centroid.count;
+                }
+            }
+
+            if (typeof lat !== 'number' || typeof lng !== 'number') {
+                return;
+            }
+
+            if (!isWithinRadius(lat, lng)) {
+                return;
+            }
+
+            const customersAffected =
+                attributes.NoOfAffectedCust_Inci ??
+                attributes.CustomersAffected ??
+                attributes.CustomersAffectedCount ??
+                0;
+
+            const region =
+                attributes.CityName ||
+                attributes.CountyName ||
+                attributes.district ||
+                attributes.County ||
+                getRegionName(lat, lng);
+
+            const estimatedRestoration =
+                attributes.ERT ||
+                attributes.EstimatedRestorationTime ||
+                'Unknown';
+
+            const cause =
+                attributes.IncidentType ||
+                attributes.OutageType ||
+                attributes.ProblemCode ||
+                'Under investigation';
+
+            outages.push({
+                id: attributes.OanNo || attributes.IncidentId || attributes.OBJECTID || `outage-${outages.length}`,
+                lat,
+                lng,
+                customersAffected,
+                region,
+                estimatedRestoration,
+                cause,
+                isPolygon,
+                polygon
+            });
+        });
+
+        return outages;
+    }
     
     // Handle different possible data structures from SCE
     if (data.outages && Array.isArray(data.outages)) {
@@ -217,8 +397,8 @@ function parseOutageData(data) {
             }
         });
     }
-    
-    return outages.length > 0 ? outages : generateMockOutageData();
+
+    return outages;
 }
 
 // Generate mock outage data for demonstration
@@ -391,6 +571,7 @@ async function updateOutageData() {
         displayOutages(outages);
     } catch (error) {
         console.error('Error updating outage data:', error);
+        setActiveDataSourceLabel('Error: Unable to load data');
     }
 }
 

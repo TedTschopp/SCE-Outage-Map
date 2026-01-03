@@ -97,11 +97,11 @@ Then navigate to `http://localhost:8000` in your browser.
 
 ### Data Source
 
-The application attempts to fetch live outage data from SCE's API endpoints. The following sources are tried in order:
+The application attempts to fetch live outage data using the same backend data sources as SCE’s official outage page:
 
-1. `https://www.sce.com/api/outages/outagedata`
-2. `https://kubra.io/data/7e7fab29-4498-41ad-ba3e-14905a4b539a/public/summary-1/data.json`
-3. `https://kubra.io/data/7e7fab29-4498-41ad-ba3e-14905a4b539a/public/cluster-1/data.json`
+- <https://www.sce.com/outages-safety/outage-center/check-outage-status>
+
+In practice, that page currently pulls outage data from ArcGIS FeatureServer endpoints. This app defaults to those ArcGIS endpoints (scoped to a bounding box around San Gabriel Valley to avoid transfer limits), and then falls back to older endpoints if needed.
 
 If all attempts fail (e.g., due to CORS restrictions or API changes), the application falls back to mock data for demonstration purposes.
 
@@ -118,11 +118,14 @@ const DATA_SOURCES = {
 
 #### Using Custom Data Source
 
-To use a different data source, modify the `DATA_SOURCES.primary` array in `app.js`:
+To use a different data source, modify `DATA_SOURCES.arcgis` (preferred) and/or `DATA_SOURCES.fallback` in `app.js`:
 
 ```javascript
 const DATA_SOURCES = {
-    primary: [
+    arcgis: {
+        outagesQueryUrl: 'https://your-custom-arcgis-server/.../query'
+    },
+    fallback: [
         'https://your-custom-api.com/outages'
     ],
     // ...

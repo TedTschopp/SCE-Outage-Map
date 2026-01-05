@@ -1022,7 +1022,8 @@ async function initDrpepLayers() {
         // Make DRPEP GRID_RANK_AGGR_FULL transparent (keep renderer/multi-color, just lower opacity).
         const isGridRankFull = typeof layerName === 'string' && layerName.trim().toUpperCase() === 'GRID_RANK_AGGR_FULL';
         if (isGridRankFull) {
-            overlay.styleAdjust = { opacityScale: 0.7, fillOpacityScale: 0.18 };
+            // Global polygon fill opacity is 0.5; scale to 0.25 => 75% transparent.
+            overlay.styleAdjust = { opacityScale: 0.7, fillOpacityScale: 0.5 };
         }
     });
 

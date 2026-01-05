@@ -72,6 +72,12 @@ h1 {
     min-height: 400px;
 }
 
+/* Keep Leaflet controls clear of fixed bottom-right overlays */
+.leaflet-bottom.leaflet-right {
+    margin-bottom: 10px;
+    margin-right: 10px;
+}
+
 /* Floating key (data source status) */
 .floating-key {
     position: fixed;

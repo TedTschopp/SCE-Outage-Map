@@ -115,6 +115,84 @@ These layers are discovered at runtime from the DRPEP ArcGIS `FeatureServer` ser
 
 To disable DRPEP overlays entirely, set `DRPEP_SOURCES.enabled = false` in `app.js`.
 
+## Programmatic Layer Control (DRPEP)
+
+This app exposes a small programmatic API on `window.LayerManager` so you can filter layers on/off and set colors without clicking the UI.
+
+### Wait for DRPEP layers to load
+
+DRPEP layers are discovered asynchronously. Always wait for readiness before calling any API:
+
+```js
+await window.LayerManager.ready();
+```
+
+### List layers (get keys)
+
+```js
+await window.LayerManager.ready();
+console.table(window.LayerManager.listLayers());
+```
+
+Each entry includes a stable `key` you can use for later calls.
+
+### Toggle (filter) layers in/out
+
+```js
+await window.LayerManager.ready();
+
+// Find by partial text match (returns keys)
+const [key] = window.LayerManager.findLayers({ text: 'SCE Service Territory' });
+
+// Hide/show
+window.LayerManager.setVisible(key, false);
+window.LayerManager.setVisible(key, true);
+```
+
+### Set default vs override colors (supports RGBA)
+
+- **Default color** affects layers in `renderer` mode (used as a fallback when the ArcGIS renderer doesn’t provide a color).
+- **Override color** forces a single color for the layer (and is what the UI color picker sets).
+
+```js
+await window.LayerManager.ready();
+const [key] = window.LayerManager.findLayers({ text: 'SCE Service Territory' });
+
+// Force a single RGBA color (alpha supported)
+window.LayerManager.setOverrideColor(key, 'rgba(0, 102, 79, 0.12)');
+
+// Switch back to renderer mode
+window.LayerManager.setStyleMode(key, 'renderer');
+
+// Set the layer’s default color (hex or rgb/rgba)
+window.LayerManager.setDefaultColor(key, 'rgba(0, 102, 79, 1)');
+```
+
+### Bulk config
+
+```js
+await window.LayerManager.ready();
+
+window.LayerManager.applyConfig({
+    // Key values come from window.LayerManager.listLayers()
+    'https://drpep.sce.com/arcgis_server/rest/services/Hosted/ICA_Layer/FeatureServer::3': {
+        visible: true,
+        defaultColor: 'rgba(0, 102, 79, 1)',
+        styleMode: 'override',
+        overrideColor: 'rgba(0, 102, 79, 0.10)'
+    }
+});
+```
+
+### Where “SCE Service Territory (Polygon)” defaults are set
+
+The built-in defaults for **DRPEP: SCE Service Territory (Polygon)** are set in `app.js` inside `initDrpepLayers()`.
+Look for the special-case block commented:
+
+> `// Special-case: DRPEP "SCE Service Territory" should default to #00664f and be transparent.`
+
+Edit `overlay.overrideColor` and `overlay.overrideStyle` there to change the initial default behavior.
+
 #### Enabling CORS Proxy
 
 If you encounter CORS issues when accessing the live API, you can enable the CORS proxy by editing `app.js`:

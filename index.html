@@ -11,22 +11,30 @@
     <div class="container">
         <header>
             <h1>SCE Outage Map - San Gabriel Valley</h1>
-            <div class="stats-container">
-                <div class="stat-box">
-                    <span class="stat-label">Outages</span>
-                    <span class="stat-value" id="outage-count">0</span>
+            <div class="header-row">
+                <div class="stats-container">
+                    <div class="stat-box">
+                        <span class="stat-label">Outages</span>
+                        <span class="stat-value" id="outage-count">0</span>
+                    </div>
+                    <div class="stat-box">
+                        <span class="stat-label">Customers Affected</span>
+                        <span class="stat-value" id="customer-count">0</span>
+                    </div>
+                    <div class="stat-box">
+                        <span class="stat-label">Regions Affected</span>
+                        <span class="stat-value" id="region-count">0</span>
+                    </div>
+                    <div class="stat-box">
+                        <span class="stat-label">Last Updated</span>
+                        <span class="stat-value" id="last-updated">Never</span>
+                    </div>
                 </div>
-                <div class="stat-box">
-                    <span class="stat-label">Customers Affected</span>
-                    <span class="stat-value" id="customer-count">0</span>
-                </div>
-                <div class="stat-box">
-                    <span class="stat-label">Regions Affected</span>
-                    <span class="stat-value" id="region-count">0</span>
-                </div>
-                <div class="stat-box">
-                    <span class="stat-label">Last Updated</span>
-                    <span class="stat-value" id="last-updated">Never</span>
+
+                <div id="layers-panel" class="layers-panel" aria-label="Layer controls">
+                    <div class="layers-panel-title">Layers</div>
+                    <div class="layers-panel-subtitle">Points, lines, and polygons</div>
+                    <div id="layers-list" class="layers-list"></div>
                 </div>
             </div>
         </header>
@@ -35,13 +43,6 @@
             <div class="floating-key-title">Data Source</div>
             <div class="floating-key-value" id="data-source-value">Loading…</div>
         </div>
-
-        <div id="layers-panel" class="layers-panel" aria-label="Layer controls">
-            <div class="layers-panel-title">Layers</div>
-            <div class="layers-panel-subtitle">Points, lines, and polygons</div>
-            <div id="layers-list" class="layers-list"></div>
-        </div>
-        
         <div id="map"></div>
         
         <div class="info-panel">

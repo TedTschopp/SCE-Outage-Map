@@ -135,6 +135,20 @@ let drpepOverlayKeyByLeafletId = new Map();
 
 const LAYER_PREFS_STORAGE_KEY = 'sce-outage-map.layer-prefs.v1';
 
+// Expose a small public API for programmatic layer control.
+// NOTE: DRPEP layers are discovered async; use `window.LayerManager.ready()` before accessing them.
+let drpepLayersReadyResolve;
+const drpepLayersReady = new Promise(resolve => {
+    drpepLayersReadyResolve = resolve;
+});
+
+function resolveDrpepLayersReady() {
+    if (typeof drpepLayersReadyResolve === 'function') {
+        drpepLayersReadyResolve();
+        drpepLayersReadyResolve = null;
+    }
+}
+
 function clamp(n, min, max) {
     return Math.min(max, Math.max(min, n));
 }
@@ -149,6 +163,81 @@ function arcgisColorArrayToRgba(color) {
     const a255 = color.length >= 4 ? clamp(Number(color[3]) || 255, 0, 255) : 255;
     const a = a255 / 255;
     return { css: `rgba(${r},${g},${b},${a})`, alpha: a };
+}
+
+function clampByte(n) {
+    return clamp(n, 0, 255);
+}
+
+function parseCssColorToRgba(input) {
+    if (typeof input !== 'string') {
+        return null;
+    }
+    const s = input.trim();
+    if (!s) {
+        return null;
+    }
+
+    // Hex: #rgb, #rgba, #rrggbb, #rrggbbaa
+    if (s[0] === '#') {
+        const hex = s.slice(1);
+        const isValid = /^[0-9a-fA-F]+$/.test(hex);
+        if (!isValid) {
+            return null;
+        }
+
+        if (hex.length === 3 || hex.length === 4) {
+            const r = parseInt(hex[0] + hex[0], 16);
+            const g = parseInt(hex[1] + hex[1], 16);
+            const b = parseInt(hex[2] + hex[2], 16);
+            const a = hex.length === 4 ? parseInt(hex[3] + hex[3], 16) / 255 : 1;
+            return { r, g, b, a: clamp(a, 0, 1) };
+        }
+        if (hex.length === 6 || hex.length === 8) {
+            const r = parseInt(hex.slice(0, 2), 16);
+            const g = parseInt(hex.slice(2, 4), 16);
+            const b = parseInt(hex.slice(4, 6), 16);
+            const a = hex.length === 8 ? parseInt(hex.slice(6, 8), 16) / 255 : 1;
+            return { r, g, b, a: clamp(a, 0, 1) };
+        }
+        return null;
+    }
+
+    // rgb()/rgba()
+    const m = s.match(/^rgba?\(\s*([\d.]+)\s*,\s*([\d.]+)\s*,\s*([\d.]+)\s*(?:,\s*([\d.]+)\s*)?\)$/i);
+    if (m) {
+        const r = clampByte(Number(m[1]) || 0);
+        const g = clampByte(Number(m[2]) || 0);
+        const b = clampByte(Number(m[3]) || 0);
+        const a = m[4] == null ? 1 : clamp(Number(m[4]) || 0, 0, 1);
+        return { r, g, b, a };
+    }
+
+    // Best-effort: allow a handful of named colors if browser can resolve them.
+    // Keep this lightweight; if it fails we just return null.
+    try {
+        const el = document.createElement('div');
+        el.style.color = s;
+        document.body.appendChild(el);
+        const computed = getComputedStyle(el).color; // typically "rgb(r, g, b)" or "rgba(r, g, b, a)"
+        document.body.removeChild(el);
+        return parseCssColorToRgba(computed);
+    } catch {
+        return null;
+    }
+}
+
+function rgbaToRgbCss({ r, g, b }) {
+    return `rgb(${clampByte(r)},${clampByte(g)},${clampByte(b)})`;
+}
+
+function cssColorToHex(input, fallback = '#007bff') {
+    const rgba = parseCssColorToRgba(input);
+    if (!rgba) {
+        return fallback;
+    }
+    const toHex2 = (n) => clampByte(n).toString(16).padStart(2, '0');
+    return `#${toHex2(rgba.r)}${toHex2(rgba.g)}${toHex2(rgba.b)}`;
 }
 
 function getRendererFromLayerInfo(layerInfo) {
@@ -222,33 +311,40 @@ function buildStyleFromSymbol({ geometryType, symbol, fallbackColor }) {
 }
 
 function buildStyleFromOverride({ geometryType, color, overrideStyle }) {
+    const parsed = parseCssColorToRgba(color);
+    const baseColor = parsed ? rgbaToRgbCss(parsed) : color;
+    const alpha = parsed ? clamp(parsed.a, 0, 1) : null;
+
+    const defaultOpacity = alpha == null ? 0.8 : alpha;
+    const defaultFillOpacity = alpha == null ? 0.08 : alpha;
+
     if (geometryType === 'esriGeometryPolygon') {
         return {
-            color,
-            fillColor: color,
-            fillOpacity: clamp(overrideStyle?.fillOpacity ?? 0.08, 0, 1),
+            color: baseColor,
+            fillColor: baseColor,
+            fillOpacity: clamp(overrideStyle?.fillOpacity ?? defaultFillOpacity, 0, 1),
             weight: overrideStyle?.weight ?? 1,
-            opacity: clamp(overrideStyle?.opacity ?? 0.8, 0, 1)
+            opacity: clamp(overrideStyle?.opacity ?? defaultOpacity, 0, 1)
         };
     }
     if (geometryType === 'esriGeometryPolyline') {
         return {
-            color,
+            color: baseColor,
             weight: overrideStyle?.weight ?? 2,
-            opacity: clamp(overrideStyle?.opacity ?? 0.8, 0, 1)
+            opacity: clamp(overrideStyle?.opacity ?? defaultOpacity, 0, 1)
         };
     }
     if (geometryType === 'esriGeometryPoint') {
         return {
             radius: overrideStyle?.radius ?? 4,
-            color,
-            fillColor: color,
-            fillOpacity: clamp(overrideStyle?.fillOpacity ?? 0.7, 0, 1),
+            color: baseColor,
+            fillColor: baseColor,
+            fillOpacity: clamp(overrideStyle?.fillOpacity ?? (alpha == null ? 0.7 : alpha), 0, 1),
             weight: overrideStyle?.weight ?? 1,
-            opacity: clamp(overrideStyle?.opacity ?? 0.9, 0, 1)
+            opacity: clamp(overrideStyle?.opacity ?? (alpha == null ? 0.9 : alpha), 0, 1)
         };
     }
-    return { color };
+    return { color: baseColor };
 }
 
 function applyStyleAdjust(style, geometryType, adjust) {
@@ -369,6 +465,11 @@ function labelForSuccessfulEndpoint(endpoint) {
 // Initialize the map
 function initMap() {
     map = L.map('map').setView([SAN_GABRIEL_VALLEY.lat, SAN_GABRIEL_VALLEY.lng], 11);
+
+    // Move zoom controls to bottom-right.
+    if (map && map.zoomControl && typeof map.zoomControl.setPosition === 'function') {
+        map.zoomControl.setPosition('bottomright');
+    }
     
     baseTileLayer = L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
         attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
@@ -502,6 +603,42 @@ function applyOverlayColor(overlay, color) {
             layer.setStyle(buildStyleFromOverride({ geometryType: overlay.geometryType, color, overrideStyle: overlay.overrideStyle }));
         }
     });
+}
+
+function applyOverlayDefaultColor(overlay, color) {
+    overlay.defaultColor = color;
+    if (overlay.styleMode !== 'override') {
+        overlay.color = color;
+        overlay.layerGroup.eachLayer(layer => {
+            if (typeof layer.setStyle !== 'function') {
+                return;
+            }
+            const attrs = layer && layer.__sceAttributes ? layer.__sceAttributes : null;
+            const symbol = attrs ? getSymbolForFeature(overlay.renderer, attrs) : null;
+            const style = symbol
+                ? buildStyleFromSymbol({ geometryType: overlay.geometryType, symbol, fallbackColor: overlay.defaultColor })
+                : (overlay.geometryType === 'esriGeometryPolygon'
+                    ? { color: overlay.defaultColor, fillColor: overlay.defaultColor, fillOpacity: 0.08, weight: 1 }
+                    : overlay.geometryType === 'esriGeometryPolyline'
+                        ? { color: overlay.defaultColor, weight: 2, opacity: 0.8 }
+                        : { radius: 4, color: overlay.defaultColor, fillColor: overlay.defaultColor, fillOpacity: 0.7, weight: 1 });
+
+            applyStyleAdjust(style, overlay.geometryType, overlay.styleAdjust);
+            layer.setStyle(style);
+        });
+    }
+}
+
+function persistOverlayPrefs(overlay) {
+    const prefs = loadLayerPrefs();
+    prefs[overlay.key] = {
+        ...(prefs[overlay.key] || {}),
+        visible: !!overlay.visible,
+        styleMode: overlay.styleMode,
+        overrideColor: overlay.overrideColor,
+        defaultColor: overlay.defaultColor
+    };
+    saveLayerPrefs(prefs);
 }
 
 function setOverlayVisibility(overlay, visible) {
@@ -762,6 +899,7 @@ async function refreshDrpepPolygonOverlays() {
                     }
 
                     const polygon = L.polygon(clipped, style);
+                    polygon.__sceAttributes = attrs;
                     polygon.bindPopup(`<div class="popup-title">${overlay.displayName}</div><div class="popup-info"><strong>OBJECTID:</strong> ${objectId ?? '—'}</div>`);
                     polygon.addTo(overlay.layerGroup);
                     continue;
@@ -779,6 +917,7 @@ async function refreshDrpepPolygonOverlays() {
                     }
 
                     const line = L.polyline(clipped, style);
+                    line.__sceAttributes = attrs;
                     line.bindPopup(`<div class="popup-title">${overlay.displayName}</div><div class="popup-info"><strong>OBJECTID:</strong> ${objectId ?? '—'}</div>`);
                     line.addTo(overlay.layerGroup);
                     continue;
@@ -795,6 +934,7 @@ async function refreshDrpepPolygonOverlays() {
                     }
 
                     const point = L.circleMarker([geometry.y, geometry.x], style);
+                    point.__sceAttributes = attrs;
                     point.bindPopup(`<div class="popup-title">${overlay.displayName}</div><div class="popup-info"><strong>OBJECTID:</strong> ${objectId ?? '—'}</div>`);
                     point.addTo(overlay.layerGroup);
                 }
@@ -810,10 +950,11 @@ async function initDrpepLayers() {
         return;
     }
 
-    const polygonLayers = await discoverDrpepLayers();
+    try {
+        const polygonLayers = await discoverDrpepLayers();
 
-    const prefs = loadLayerPrefs();
-    polygonLayers
+        const prefs = loadLayerPrefs();
+        polygonLayers
         // Do not include the PARTIAL grid layer at all.
         .filter(l => {
             const name = typeof l.layerName === 'string' ? l.layerName.trim().toUpperCase() : '';
@@ -836,7 +977,9 @@ async function initDrpepLayers() {
                     : '';
         const displayName = `${serviceLabel}: ${layerName}${geometrySuffix}`;
         const saved = prefs[key] || {};
-        const defaultColor = getDefaultColorFromRenderer(renderer);
+        const derivedDefaultColor = getDefaultColorFromRenderer(renderer);
+        const persistedDefaultColor = typeof saved.defaultColor === 'string' ? saved.defaultColor : null;
+        const defaultColor = persistedDefaultColor || derivedDefaultColor;
 
         const overlay = getOrCreatePolygonOverlay({
             key,
@@ -880,9 +1023,12 @@ async function initDrpepLayers() {
         }
     });
 
-    renderLayerSettingsPanel();
+        renderLayerSettingsPanel();
 
-    await refreshDrpepPolygonOverlays();
+        await refreshDrpepPolygonOverlays();
+    } finally {
+        resolveDrpepLayersReady();
+    }
 }
 
 function renderLayerSettingsPanel() {
@@ -912,7 +1058,13 @@ function renderLayerSettingsPanel() {
         checkbox.className = 'layers-toggle';
         checkbox.addEventListener('change', () => {
             setOverlayVisibility(overlay, checkbox.checked);
-            prefs[overlay.key] = { ...(prefs[overlay.key] || {}), visible: checkbox.checked, color: overlay.color };
+            prefs[overlay.key] = {
+                ...(prefs[overlay.key] || {}),
+                visible: checkbox.checked,
+                styleMode: overlay.styleMode,
+                overrideColor: overlay.overrideColor,
+                defaultColor: overlay.defaultColor
+            };
             saveLayerPrefs(prefs);
         });
 
@@ -923,7 +1075,7 @@ function renderLayerSettingsPanel() {
         const color = document.createElement('input');
         color.type = 'color';
         // If a layer is multi-color by renderer, the picker acts as an override.
-        color.value = overlay.styleMode === 'override' ? overlay.overrideColor : overlay.defaultColor;
+        color.value = cssColorToHex(overlay.styleMode === 'override' ? overlay.overrideColor : overlay.defaultColor);
         color.className = 'layers-color';
         color.addEventListener('input', () => {
             applyOverlayColor(overlay, color.value);
@@ -931,7 +1083,8 @@ function renderLayerSettingsPanel() {
                 ...(prefs[overlay.key] || {}),
                 visible: overlay.visible,
                 styleMode: 'override',
-                overrideColor: color.value
+                overrideColor: color.value,
+                defaultColor: overlay.defaultColor
             };
             saveLayerPrefs(prefs);
         });
@@ -942,6 +1095,125 @@ function renderLayerSettingsPanel() {
         list.appendChild(row);
     });
 }
+
+function getOverlayByKey(key) {
+    return key ? drpepPolygonOverlaysByKey.get(key) || null : null;
+}
+
+function findOverlaysByText(text) {
+    const q = typeof text === 'string' ? text.trim().toLowerCase() : '';
+    if (!q) {
+        return [];
+    }
+    return Array.from(drpepPolygonOverlaysByKey.values()).filter(o => (o.displayName || '').toLowerCase().includes(q));
+}
+
+function applyLayerConfig(config = {}) {
+    if (!config || typeof config !== 'object') {
+        return;
+    }
+
+    for (const [key, cfg] of Object.entries(config)) {
+        const overlay = getOverlayByKey(key);
+        if (!overlay || !cfg || typeof cfg !== 'object') {
+            continue;
+        }
+
+        if (typeof cfg.visible === 'boolean') {
+            setOverlayVisibility(overlay, cfg.visible);
+        }
+
+        if (typeof cfg.defaultColor === 'string') {
+            applyOverlayDefaultColor(overlay, cfg.defaultColor);
+        }
+
+        if (typeof cfg.overrideColor === 'string') {
+            applyOverlayColor(overlay, cfg.overrideColor);
+        }
+
+        if (cfg.styleMode === 'renderer' || cfg.styleMode === 'override') {
+            overlay.styleMode = cfg.styleMode;
+            overlay.color = overlay.styleMode === 'override' ? overlay.overrideColor : overlay.defaultColor;
+            if (overlay.styleMode === 'override') {
+                applyOverlayColor(overlay, overlay.overrideColor);
+            } else {
+                applyOverlayDefaultColor(overlay, overlay.defaultColor);
+            }
+        }
+
+        persistOverlayPrefs(overlay);
+    }
+
+    renderLayerSettingsPanel();
+}
+
+// Public programmatic API
+window.LayerManager = {
+    ready: () => drpepLayersReady,
+    listLayers: () => Array.from(drpepPolygonOverlaysByKey.values()).map(o => ({
+        key: o.key,
+        displayName: o.displayName,
+        geometryType: o.geometryType,
+        visible: !!o.visible,
+        styleMode: o.styleMode,
+        defaultColor: o.defaultColor,
+        overrideColor: o.overrideColor,
+        effectiveColor: o.styleMode === 'override' ? o.overrideColor : o.defaultColor
+    })),
+    getLayer: (key) => {
+        const o = getOverlayByKey(key);
+        return o ? {
+            key: o.key,
+            displayName: o.displayName,
+            geometryType: o.geometryType,
+            visible: !!o.visible,
+            styleMode: o.styleMode,
+            defaultColor: o.defaultColor,
+            overrideColor: o.overrideColor,
+            effectiveColor: o.styleMode === 'override' ? o.overrideColor : o.defaultColor
+        } : null;
+    },
+    findLayers: ({ text } = {}) => findOverlaysByText(text).map(o => o.key),
+    setVisible: (key, visible) => {
+        const o = getOverlayByKey(key);
+        if (!o || typeof visible !== 'boolean') return false;
+        setOverlayVisibility(o, visible);
+        persistOverlayPrefs(o);
+        renderLayerSettingsPanel();
+        return true;
+    },
+    setDefaultColor: (key, color) => {
+        const o = getOverlayByKey(key);
+        if (!o || typeof color !== 'string') return false;
+        applyOverlayDefaultColor(o, color);
+        persistOverlayPrefs(o);
+        renderLayerSettingsPanel();
+        return true;
+    },
+    setOverrideColor: (key, color) => {
+        const o = getOverlayByKey(key);
+        if (!o || typeof color !== 'string') return false;
+        applyOverlayColor(o, color);
+        persistOverlayPrefs(o);
+        renderLayerSettingsPanel();
+        return true;
+    },
+    setStyleMode: (key, mode) => {
+        const o = getOverlayByKey(key);
+        if (!o || (mode !== 'renderer' && mode !== 'override')) return false;
+        o.styleMode = mode;
+        o.color = o.styleMode === 'override' ? o.overrideColor : o.defaultColor;
+        if (o.styleMode === 'override') {
+            applyOverlayColor(o, o.overrideColor);
+        } else {
+            applyOverlayDefaultColor(o, o.defaultColor);
+        }
+        persistOverlayPrefs(o);
+        renderLayerSettingsPanel();
+        return true;
+    },
+    applyConfig: (config) => applyLayerConfig(config)
+};
 
 // Convert miles to meters
 function milesToMeters(miles) {

@@ -23,6 +23,13 @@ header {
     z-index: 1000;
 }
 
+.header-row {
+    display: flex;
+    gap: 15px;
+    align-items: flex-start;
+    flex-wrap: wrap;
+}
+
 h1 {
     color: #333;
     font-size: 24px;
@@ -93,10 +100,6 @@ h1 {
 
 /* Layers panel (DRPEP/SCE polygon overlays) */
 .layers-panel {
-    position: fixed;
-    left: 16px;
-    bottom: 16px;
-    z-index: 1200;
     background-color: #fff;
     border: 1px solid #ddd;
     border-radius: 8px;
@@ -104,8 +107,8 @@ h1 {
     font-size: 12px;
     color: #333;
     box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-    max-width: 320px;
-    width: calc(100% - 32px);
+    max-width: 360px;
+    width: 360px;
 }
 
 .layers-panel-title {
@@ -122,7 +125,7 @@ h1 {
     display: flex;
     flex-direction: column;
     gap: 8px;
-    max-height: 220px;
+    max-height: 180px;
     overflow: auto;
     padding-right: 2px;
 }
@@ -236,8 +239,7 @@ h1 {
     }
 
     .layers-panel {
-        left: 10px;
-        bottom: 62px;
-        max-width: 280px;
+        width: 100%;
+        max-width: 100%;
     }
 }

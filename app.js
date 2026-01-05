@@ -135,6 +135,9 @@ let drpepOverlayKeyByLeafletId = new Map();
 
 const LAYER_PREFS_STORAGE_KEY = 'sce-outage-map.layer-prefs.v1';
 
+// Global styling preference: all polygons render at 50% fill opacity.
+const POLYGON_FILL_OPACITY = 0.5;
+
 // Expose a small public API for programmatic layer control.
 // NOTE: DRPEP layers are discovered async; use `window.LayerManager.ready()` before accessing them.
 let drpepLayersReadyResolve;
@@ -285,7 +288,7 @@ function buildStyleFromSymbol({ geometryType, symbol, fallbackColor }) {
         return {
             color,
             fillColor,
-            fillOpacity: clamp(fillOpacity, 0, 1),
+            fillOpacity: clamp(POLYGON_FILL_OPACITY, 0, 1),
             weight: Number.isFinite(outlineWidth) ? outlineWidth : 1
         };
     }
@@ -322,7 +325,7 @@ function buildStyleFromOverride({ geometryType, color, overrideStyle }) {
         return {
             color: baseColor,
             fillColor: baseColor,
-            fillOpacity: clamp(overrideStyle?.fillOpacity ?? defaultFillOpacity, 0, 1),
+            fillOpacity: clamp(POLYGON_FILL_OPACITY, 0, 1),
             weight: overrideStyle?.weight ?? 1,
             opacity: clamp(overrideStyle?.opacity ?? defaultOpacity, 0, 1)
         };
@@ -2008,7 +2011,7 @@ function displayOutages(outages) {
             const polygon = L.polygon(outage.polygon, {
                 color: '#dc3545',
                 fillColor: '#dc3545',
-                fillOpacity: 0.2,
+                fillOpacity: 0.5,
                 weight: 2
             }).addTo(map);
             

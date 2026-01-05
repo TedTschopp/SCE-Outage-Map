@@ -579,6 +579,7 @@ function getOrCreatePolygonOverlay({ key, displayName, serviceUrl, layerId, geom
         overrideColor: initialColor,
         overrideStyle: null,
         styleAdjust: null,
+        fillOpacityOverride: null,
         color: initialColor,
         visible: initialVisible
     };
@@ -603,7 +604,12 @@ function applyOverlayColor(overlay, color) {
     overlay.color = color;
     overlay.layerGroup.eachLayer(layer => {
         if (typeof layer.setStyle === 'function') {
-            layer.setStyle(buildStyleFromOverride({ geometryType: overlay.geometryType, color, overrideStyle: overlay.overrideStyle }));
+            const style = buildStyleFromOverride({ geometryType: overlay.geometryType, color, overrideStyle: overlay.overrideStyle });
+            applyStyleAdjust(style, overlay.geometryType, overlay.styleAdjust);
+            if (overlay.geometryType === 'esriGeometryPolygon' && typeof overlay.fillOpacityOverride === 'number') {
+                style.fillOpacity = clamp(overlay.fillOpacityOverride, 0, 1);
+            }
+            layer.setStyle(style);
         }
     });
 }
@@ -627,6 +633,9 @@ function applyOverlayDefaultColor(overlay, color) {
                         : { radius: 4, color: overlay.defaultColor, fillColor: overlay.defaultColor, fillOpacity: 0.7, weight: 1 });
 
             applyStyleAdjust(style, overlay.geometryType, overlay.styleAdjust);
+            if (overlay.geometryType === 'esriGeometryPolygon' && typeof overlay.fillOpacityOverride === 'number') {
+                style.fillOpacity = clamp(overlay.fillOpacityOverride, 0, 1);
+            }
             layer.setStyle(style);
         });
     }
@@ -889,6 +898,9 @@ async function refreshDrpepPolygonOverlays() {
                                 : { radius: 4, color: effectiveColor, fillColor: effectiveColor, fillOpacity: 0.7, weight: 1 }));
 
                 applyStyleAdjust(style, overlay.geometryType, overlay.styleAdjust);
+                if (overlay.geometryType === 'esriGeometryPolygon' && typeof overlay.fillOpacityOverride === 'number') {
+                    style.fillOpacity = clamp(overlay.fillOpacityOverride, 0, 1);
+                }
 
                 if (overlay.geometryType === 'esriGeometryPolygon') {
                     const latLngs = arcgisRingsToLeafletLatLngs(geometry.rings);
@@ -1024,6 +1036,8 @@ async function initDrpepLayers() {
         if (isGridRankFull) {
             // Global polygon fill opacity is 0.5; scale to 0.25 => 75% transparent.
             overlay.styleAdjust = { opacityScale: 0.7, fillOpacityScale: 0.5 };
+            // Enforce fill regardless of renderer/override mode.
+            overlay.fillOpacityOverride = 0.25;
         }
     });
 

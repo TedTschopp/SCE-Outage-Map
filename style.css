@@ -107,7 +107,7 @@ h1 {
 /* Layers panel (DRPEP/SCE polygon overlays) */
 .layers-panel {
     position: fixed;
-    right: 16px;
+    left: 16px;
     bottom: 86px;
     z-index: 1500;
     background-color: #fff;
@@ -249,7 +249,7 @@ h1 {
     }
 
     .layers-panel {
-        right: 10px;
+        left: 10px;
         bottom: 62px;
         max-width: 280px;
         width: calc(100% - 20px);
